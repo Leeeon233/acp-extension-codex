@@ -119,6 +119,7 @@ export class CodexAcpServer implements acp.Agent {
                     list: { }
                 },
                 mcpCapabilities: {
+                    acp: false,
                     http: true,
                     sse: false
                 }
