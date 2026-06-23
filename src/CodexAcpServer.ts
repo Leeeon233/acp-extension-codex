@@ -33,6 +33,7 @@ import {CodexCommands} from "./CodexCommands";
 import type {QuotaMeta} from "./QuotaMeta";
 import {logger} from "./Logger";
 import {sanitizeMcpServerName} from "./McpServerName";
+import {createResponseItemHistoryFallbackUpdates} from "./ResponseItemHistoryFallback";
 import {
     type LegacyLoadSessionResponse,
     type LegacyNewSessionResponse,
@@ -44,6 +45,7 @@ import {
     LEGACY_SET_SESSION_MODEL_METHOD,
 } from "./AcpExtensions";
 import {
+    createCommandExecutionCompleteUpdate,
     createCommandExecutionUpdate,
     createDynamicToolCallUpdate,
     createFileChangeUpdate,
@@ -853,17 +855,29 @@ export class CodexAcpServer {
 
     private async streamThreadHistory(sessionId: string, thread: Thread): Promise<void> {
         const session = new ACPSessionConnection(this.connection, sessionId);
+        const sessionState = this.getSessionState(sessionId);
+        const responseItemFallbackUpdates = await createResponseItemHistoryFallbackUpdates(
+            thread,
+            sessionState.terminalOutputMode,
+        );
+
+        const threadUpdates: UpdateSessionEvent[] = [];
         for (const turn of thread.turns) {
             for (const item of turn.items) {
-                const updates = await this.createHistoryUpdates(item);
-                for (const update of updates) {
-                    await session.update(update);
-                }
+                const updates = await this.createHistoryUpdates(item, sessionState);
+                threadUpdates.push(...updates);
             }
+        }
+
+        const updates = responseItemFallbackUpdates
+            ? mergeHistoryUpdates(responseItemFallbackUpdates, threadUpdates)
+            : threadUpdates;
+        for (const update of updates) {
+            await session.update(update);
         }
     }
 
-    private async createHistoryUpdates(item: ThreadItem): Promise<UpdateSessionEvent[]> {
+    private async createHistoryUpdates(item: ThreadItem, sessionState: SessionState): Promise<UpdateSessionEvent[]> {
         switch (item.type) {
             case "userMessage":
                 return this.createUserMessageUpdates(item);
@@ -880,8 +894,14 @@ export class CodexAcpServer {
                 return this.createReasoningUpdates(item);
             case "fileChange":
                 return [await createFileChangeUpdate(item)];
-            case "commandExecution":
-                return [await createCommandExecutionUpdate(item)];
+            case "commandExecution": {
+                const updates = [await createCommandExecutionUpdate(item)];
+                const completeUpdate = createCommandExecutionCompleteUpdate(item, sessionState.terminalOutputMode);
+                if (completeUpdate) {
+                    updates.push(completeUpdate);
+                }
+                return updates;
+            }
             case "mcpToolCall":
                 return [await createMcpToolCallUpdate(item)];
             case "dynamicToolCall":
@@ -1478,6 +1498,71 @@ export class CodexAcpServer {
 
         // After turnInterrupt(), Codex will send turn/completed, which naturally completes awaitTurnCompleted().
         await this.interruptSessionTurn(sessionState, "Cancel", false);
+    }
+}
+
+function mergeHistoryUpdates(
+    responseItemFallbackUpdates: UpdateSessionEvent[],
+    threadUpdates: UpdateSessionEvent[],
+): UpdateSessionEvent[] {
+    const merged: UpdateSessionEvent[] = [];
+    const seen = new Set<string>();
+    let fallbackIndex = 0;
+
+    const pushUpdate = (update: UpdateSessionEvent) => {
+        const key = historyUpdateKey(update);
+        if (key && seen.has(key)) {
+            return;
+        }
+        if (key) {
+            seen.add(key);
+        }
+        merged.push(update);
+    };
+
+    const flushFallbackThrough = (targetKey: string): boolean => {
+        const matchIndex = responseItemFallbackUpdates.findIndex((update, index) => (
+            index >= fallbackIndex && historyUpdateKey(update) === targetKey
+        ));
+        if (matchIndex === -1) {
+            return false;
+        }
+
+        while (fallbackIndex <= matchIndex) {
+            pushUpdate(responseItemFallbackUpdates[fallbackIndex]!);
+            fallbackIndex += 1;
+        }
+        return true;
+    };
+
+    for (const update of threadUpdates) {
+        const key = historyUpdateKey(update);
+        if (key && flushFallbackThrough(key)) {
+            continue;
+        }
+        pushUpdate(update);
+    }
+
+    while (fallbackIndex < responseItemFallbackUpdates.length) {
+        pushUpdate(responseItemFallbackUpdates[fallbackIndex]!);
+        fallbackIndex += 1;
+    }
+
+    return merged;
+}
+
+function historyUpdateKey(update: UpdateSessionEvent): string | null {
+    switch (update.sessionUpdate) {
+        case "user_message_chunk":
+        case "agent_message_chunk":
+        case "agent_thought_chunk":
+            return `${update.sessionUpdate}:${JSON.stringify(update.content)}`;
+        case "tool_call":
+            return `tool_call:${update.toolCallId}:start`;
+        case "tool_call_update":
+            return `tool_call:${update.toolCallId}:update`;
+        default:
+            return null;
     }
 }
 
