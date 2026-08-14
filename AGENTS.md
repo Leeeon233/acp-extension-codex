@@ -17,6 +17,9 @@
 
 - Keep edits consistent with existing formatting.
 - When adding env/config knobs, document them in `readme-dev.md`.
+- Lody may launch the adapter from an Electron or daemon process with no Windows console.
+  Set `windowsHide: true` on every adapter-owned console-subsystem child process spawn;
+  `ELECTRON_RUN_AS_NODE` is a separate runtime-mode concern.
 - When updating discriminated-union/event `switch` statements, do not add a trailing fallback like `return null` only to satisfy TypeScript.
 - Handle each variant with an explicit `case`; if intentionally ignored, use an explicit no-op case.
 

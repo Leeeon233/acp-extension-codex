@@ -14,15 +14,16 @@ export interface CodexConnection {
 
 export function startCodexConnection(codexPath?: string, env?: NodeJS.ProcessEnv): CodexConnection {
     const spawnEnv = env ?? process.env;
+    const spawnOptions = {env: spawnEnv, windowsHide: true};
 
     let codex: ChildProcessWithoutNullStreams;
     if (codexPath) {
         codex = process.platform === 'win32'
-            ? spawn(`"${codexPath}" app-server`, { shell: true, env: spawnEnv })
-            : spawn(codexPath, ['app-server'], { env: spawnEnv });
+            ? spawn(`"${codexPath}" app-server`, {...spawnOptions, shell: true})
+            : spawn(codexPath, ['app-server'], spawnOptions);
     } else {
         const bundledCodexPath = createRequire(import.meta.url).resolve("@openai/codex/bin/codex.js");
-        codex = spawn(process.execPath, [bundledCodexPath, 'app-server'], {env: spawnEnv});
+        codex = spawn(process.execPath, [bundledCodexPath, 'app-server'], spawnOptions);
     }
 
     attachLogs(codex);
