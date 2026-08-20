@@ -20,6 +20,15 @@
 - Lody may launch the adapter from an Electron or daemon process with no Windows console.
   Set `windowsHide: true` on every adapter-owned console-subsystem child process spawn;
   `ELECTRON_RUN_AS_NODE` is a separate runtime-mode concern.
+- Wait for every client-requested MCP server to reach a terminal Codex startup
+  status before returning from new/load/resume/fork. Publish failures and
+  cancellations synchronously before the session-open response; for load, emit
+  them after history replay so client replay suppression cannot discard them.
+  This contract is provider-neutral: do not inspect client-specific `_meta` or
+  special-case server names. Key startup state by Codex thread plus sanitized
+  server name so concurrent sessions using the same name cannot settle each
+  other's waiters. Clear that state on thread close, and reject waiters when
+  either the thread or Codex connection closes.
 - When updating discriminated-union/event `switch` statements, do not add a trailing fallback like `return null` only to satisfy TypeScript.
 - Handle each variant with an explicit `case`; if intentionally ignored, use an explicit no-op case.
 

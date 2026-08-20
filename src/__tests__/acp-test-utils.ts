@@ -244,6 +244,7 @@ export function removeDirectoryWithRetry(directory: string): void {
 export interface CodexMockTestFixture extends TestFixture {
     sendServerNotification(notification: ServerNotification | Record<string, unknown>): void,
     sendServerRequest<T>(method: string, params: unknown): Promise<T>,
+    closeCodexConnection(): void,
     setPermissionResponse(response: RequestPermissionResponse): void,
     setElicitationResponse(response: CreateElicitationResponse | Promise<CreateElicitationResponse>): void,
 }
@@ -257,6 +258,8 @@ export interface CodexMockTestFixture extends TestFixture {
  */
 export function createCodexMockTestFixture(): CodexMockTestFixture {
     let unhandledNotificationHandler: ((notification: any) => void) | null = null;
+    let closeHandler: (() => void) | null = null;
+    let disposeHandler: (() => void) | null = null;
     const requestHandlers = new Map<string, (params: unknown) => Promise<unknown>>();
 
     // State for controlling permission responses
@@ -269,8 +272,14 @@ export function createCodexMockTestFixture(): CodexMockTestFixture {
 
     const mockCodexConnection = {
         sendRequest: () => Promise.resolve(undefined),
-        onClose: () => ({ dispose: () => {} }),
-        onDispose: () => ({ dispose: () => {} }),
+        onClose: (handler: () => void) => {
+            closeHandler = handler;
+            return { dispose: () => {} };
+        },
+        onDispose: (handler: () => void) => {
+            disposeHandler = handler;
+            return { dispose: () => {} };
+        },
         onUnhandledNotification: (handler: (notification: any) => void) => {
             unhandledNotificationHandler = handler;
         },
@@ -325,6 +334,10 @@ export function createCodexMockTestFixture(): CodexMockTestFixture {
                 throw new Error(`No handler registered for ${method}`);
             }
             return await handler(params) as T;
+        },
+        closeCodexConnection(): void {
+            closeHandler?.();
+            disposeHandler?.();
         },
         setPermissionResponse(response: RequestPermissionResponse): void {
             permissionState.response = response;

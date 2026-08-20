@@ -168,20 +168,31 @@ export class CodexAppServerClient {
         this.connection = connection;
         // Process exit disposes the connection (see CodexJsonRpcConnection);
         // fail waiters that only a now-impossible notification could settle.
-        const failPendingTurns = () => this.rejectAllPendingTurnCompletions(
-            new Error("Codex process exited before completing the turn"),
-        );
-        this.connection.onClose(failPendingTurns);
-        this.connection.onDispose(failPendingTurns);
+        const failPendingOperations = () => {
+            this.rejectAllPendingTurnCompletions(
+                new Error("Codex process exited before completing the turn"),
+            );
+            this.rejectAllPendingMcpServerStartups(
+                new Error("Codex process exited before MCP server startup completed"),
+            );
+        };
+        this.connection.onClose(failPendingOperations);
+        this.connection.onDispose(failPendingOperations);
         this.connection.onUnhandledNotification((data) => {
             const serverNotification = data as ServerNotification;
             if (isMcpServerStatusUpdatedNotification(serverNotification)) {
                 this.mcpServerStartupVersion += 1;
-                this.mcpServerStartupStates.set(serverNotification.params.name, {
-                    status: serverNotification.params.status,
-                    error: serverNotification.params.error,
-                    version: this.mcpServerStartupVersion,
-                });
+                this.mcpServerStartupStates.set(
+                    mcpServerStartupKey(
+                        serverNotification.params.threadId,
+                        serverNotification.params.name,
+                    ),
+                    {
+                        status: serverNotification.params.status,
+                        error: serverNotification.params.error,
+                        version: this.mcpServerStartupVersion,
+                    },
+                );
                 this.resolveMcpServerStartupResolvers();
             }
             if (isTurnCompletedNotification(serverNotification)) {
@@ -284,6 +295,24 @@ export class CodexAppServerClient {
         this.notificationHandlers.delete(threadId);
         this.approvalHandlers.delete(threadId);
         this.elicitationHandlers.delete(threadId);
+        for (const key of this.mcpServerStartupStates.keys()) {
+            if (key.startsWith(`${threadId}\0`)) {
+                this.mcpServerStartupStates.delete(key);
+            }
+        }
+        const pendingResolvers: Array<McpServerStartupResolver> = [];
+        for (const resolver of this.mcpServerStartupResolvers) {
+            if (resolver.threadId === threadId) {
+                resolver.reject(new Error(`Codex thread ${threadId} closed during MCP startup`));
+            } else {
+                pendingResolvers.push(resolver);
+            }
+        }
+        this.mcpServerStartupResolvers.splice(
+            0,
+            this.mcpServerStartupResolvers.length,
+            ...pendingResolvers,
+        );
     }
 
     async initialize(params: InitializeParams): Promise<InitializeResponse> {
@@ -628,22 +657,28 @@ export class CodexAppServerClient {
         return this.mcpServerStartupVersion;
     }
 
-    async awaitMcpServerStartup(serverNames: Array<string>, afterVersion: number): Promise<McpStartupResult> {
+    async awaitMcpServerStartup(
+        threadId: string,
+        serverNames: Array<string>,
+        afterVersion: number,
+    ): Promise<McpStartupResult> {
         const uniqueServerNames = Array.from(new Set(serverNames.map(serverName => serverName.trim()).filter(serverName => serverName.length > 0)));
         if (uniqueServerNames.length === 0) {
             return { ready: [], failed: [], cancelled: [] };
         }
 
-        const result = this.tryBuildMcpStartupResult(uniqueServerNames, afterVersion);
+        const result = this.tryBuildMcpStartupResult(threadId, uniqueServerNames, afterVersion);
         if (result !== null) {
             return result;
         }
 
-        return await new Promise((resolve) => {
+        return await new Promise((resolve, reject) => {
             this.mcpServerStartupResolvers.push({
+                threadId,
                 serverNames: uniqueServerNames,
                 afterVersion,
                 resolve,
+                reject,
             });
         });
     }
@@ -965,7 +1000,11 @@ export class CodexAppServerClient {
     private resolveMcpServerStartupResolvers(): void {
         const pendingResolvers: Array<McpServerStartupResolver> = [];
         for (const resolver of this.mcpServerStartupResolvers) {
-            const result = this.tryBuildMcpStartupResult(resolver.serverNames, resolver.afterVersion);
+            const result = this.tryBuildMcpStartupResult(
+                resolver.threadId,
+                resolver.serverNames,
+                resolver.afterVersion,
+            );
             if (result !== null) {
                 resolver.resolve(result);
             } else {
@@ -975,13 +1014,29 @@ export class CodexAppServerClient {
         this.mcpServerStartupResolvers.splice(0, this.mcpServerStartupResolvers.length, ...pendingResolvers);
     }
 
-    private tryBuildMcpStartupResult(serverNames: Array<string>, afterVersion: number): McpStartupResult | null {
+    private rejectAllPendingMcpServerStartups(error: Error): void {
+        const pendingResolvers = this.mcpServerStartupResolvers.splice(
+            0,
+            this.mcpServerStartupResolvers.length,
+        );
+        for (const resolver of pendingResolvers) {
+            resolver.reject(error);
+        }
+    }
+
+    private tryBuildMcpStartupResult(
+        threadId: string,
+        serverNames: Array<string>,
+        afterVersion: number,
+    ): McpStartupResult | null {
         const ready: Array<string> = [];
         const failed: Array<McpStartupFailure> = [];
         const cancelled: Array<string> = [];
 
         for (const serverName of serverNames) {
-            const state = this.mcpServerStartupStates.get(serverName);
+            const state = this.mcpServerStartupStates.get(
+                mcpServerStartupKey(threadId, serverName),
+            );
             if (!state || state.version <= afterVersion) {
                 return null;
             }
@@ -1059,10 +1114,16 @@ type McpServerStartupSnapshot = {
 };
 
 type McpServerStartupResolver = {
+    threadId: string;
     serverNames: Array<string>;
     afterVersion: number;
     resolve: (result: McpStartupResult) => void;
+    reject: (error: Error) => void;
 };
+
+function mcpServerStartupKey(threadId: string | null, serverName: string): string {
+    return `${threadId ?? ""}\0${serverName}`;
+}
 
 function isMcpServerStatusUpdatedNotification(notification: ServerNotification): notification is {
     method: "mcpServer/startupStatus/updated";

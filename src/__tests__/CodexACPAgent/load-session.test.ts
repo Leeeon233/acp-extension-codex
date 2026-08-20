@@ -581,7 +581,7 @@ describe("CodexACPAgent - loadSession", () => {
         }
     });
 
-    it("publishes MCP startup failure for explicitly requested servers during loadSession", async () => {
+    it("publishes requested MCP startup failure after replay and before loadSession completes", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpAgent = fixture.getCodexAcpAgent();
         const codexAcpClient = fixture.getCodexAcpClient();
@@ -641,21 +641,49 @@ describe("CodexACPAgent - loadSession", () => {
             agentRole: null,
             gitInfo: null,
             name: null,
-            turns: [],
+            turns: [{
+                id: "turn-before-mcp-failure",
+                itemsView: "full",
+                status: "completed",
+                error: null,
+                startedAt: null,
+                completedAt: null,
+                durationMs: null,
+                items: [{
+                    type: "userMessage",
+                    id: "item-before-mcp-failure",
+                    clientId: null,
+                    content: [{
+                        type: "text",
+                        text: "history-before-mcp-failure",
+                        text_elements: [],
+                    }],
+                }],
+            }],
         };
-        codexAppServerClient.threadResume = vi.fn().mockResolvedValue({
-            thread: thread,
-            model: model.id,
-            modelProvider: "openai",
-            cwd: "/test/project",
-            approvalPolicy: "never",
-            sandbox: { type: "dangerFullAccess" },
-            reasoningEffort: model.defaultReasoningEffort,
+        codexAppServerClient.threadResume = vi.fn().mockImplementation(async () => {
+            queueMicrotask(() => fixture.sendServerNotification({
+                method: "mcpServer/startupStatus/updated",
+                params: {
+                    threadId: "session-1",
+                    name: "broken-mcp",
+                    status: "failed",
+                    error: "boom",
+                },
+            }));
+            return {
+                thread: thread,
+                model: model.id,
+                modelProvider: "openai",
+                cwd: "/test/project",
+                approvalPolicy: "never",
+                sandbox: { type: "dangerFullAccess" },
+                reasoningEffort: model.defaultReasoningEffort,
+            } as any;
         });
         codexAppServerClient.threadRead = vi.fn().mockResolvedValue({
             thread: thread,
         });
-
         await codexAcpAgent.initialize({ protocolVersion: 1 });
 
         const loadPromise = codexAcpAgent.loadSession({
@@ -669,21 +697,14 @@ describe("CodexACPAgent - loadSession", () => {
             }],
         });
 
-        await vi.waitFor(() => {
-            expect(codexAcpAgent.getSessionState("session-1").sessionMcpServers).toEqual(["broken-mcp"]);
-        });
-
-        fixture.sendServerNotification({
-            method: "mcpServer/startupStatus/updated",
-            params: { threadId: "session-1", name: "broken-mcp", status: "failed", error: "boom" }
-        });
-
         await loadPromise;
 
-        await vi.waitFor(() => {
-            const dump = fixture.getAcpConnectionDump([]);
-            expect(dump).toContain('"toolCallId": "mcp_startup.broken-mcp"');
-            expect(dump).toContain('MCP server `broken-mcp` failed to start: boom');
-        });
+        const dump = fixture.getAcpConnectionDump([]);
+        const historyIndex = dump.indexOf("history-before-mcp-failure");
+        const startupFailureIndex = dump.indexOf('"toolCallId": "mcp_startup.broken-mcp"');
+        expect(codexAcpAgent.getSessionState("session-1").sessionMcpServers).toEqual(["broken-mcp"]);
+        expect(historyIndex).toBeGreaterThan(-1);
+        expect(startupFailureIndex).toBeGreaterThan(historyIndex);
+        expect(dump).toContain('MCP server `broken-mcp` failed to start: boom');
     });
 });

@@ -594,8 +594,12 @@ export class CodexAcpClient {
         await this.codexClient.runGoalClear({threadId: sessionId});
     }
 
-    async awaitMcpServerStartup(serverNames: Array<string>, afterVersion: number): Promise<McpStartupResult> {
-        return await this.codexClient.awaitMcpServerStartup(serverNames, afterVersion);
+    async awaitMcpServerStartup(
+        threadId: string,
+        serverNames: Array<string>,
+        afterVersion: number,
+    ): Promise<McpStartupResult> {
+        return await this.codexClient.awaitMcpServerStartup(threadId, serverNames, afterVersion);
     }
 
     getMcpServerStartupVersion(): number {

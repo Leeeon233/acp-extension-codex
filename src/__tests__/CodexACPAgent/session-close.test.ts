@@ -7,7 +7,6 @@ import {
 } from "../acp-test-utils";
 import type {CodexAcpServer} from "../../CodexAcpServer";
 import type {CodexAcpClient, SessionMetadata} from "../../CodexAcpClient";
-import type {McpStartupResult} from "../../CodexAppServerClient";
 import type {TurnStartResponse} from "../../app-server/v2";
 import type {McpServer} from "@agentclientprotocol/sdk";
 
@@ -153,46 +152,6 @@ describe("ACP session close", () => {
             "data/session-close-interrupt-failed.json"
         );
         expect(() => codexAcpAgent.getSessionState(sessionId)).toThrow(`Session ${sessionId} not found`);
-    });
-
-    it("suppresses MCP startup updates while close is in progress", async () => {
-        const mcpStartup = deferred<McpStartupResult>();
-        const mcpServer: McpServer = {
-            name: "broken-mcp",
-            command: "npx",
-            args: ["broken"],
-            env: [],
-        };
-        const {fixture, codexAcpAgent, codexAcpClient} = await createSession({
-            mcpServers: [mcpServer],
-            configure: ({codexAcpClient}) => {
-                vi.spyOn(codexAcpClient, "awaitMcpServerStartup").mockReturnValue(mcpStartup.promise);
-            },
-        });
-        const unsubscribe = deferred<void>();
-        vi.spyOn(codexAcpClient, "closeSession").mockReturnValue(unsubscribe.promise);
-
-        await vi.waitFor(() => {
-            expect(codexAcpClient.awaitMcpServerStartup).toHaveBeenCalledWith(["broken-mcp"], expect.any(Number));
-        });
-        fixture.clearAcpConnectionDump();
-
-        const closePromise = codexAcpAgent.closeSession({sessionId});
-        await vi.waitFor(() => {
-            expect(codexAcpClient.closeSession).toHaveBeenCalledWith(sessionId);
-        });
-
-        mcpStartup.resolve({
-            ready: [],
-            failed: [{server: "broken-mcp", error: "boom"}],
-            cancelled: [],
-        });
-        await waitForMicrotasks();
-
-        expect(fixture.getAcpConnectionEvents([])).toEqual([]);
-
-        unsubscribe.resolve(undefined);
-        await closePromise;
     });
 
     it("rejects an in-flight resume that completes after close", async () => {
