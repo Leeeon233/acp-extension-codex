@@ -450,6 +450,14 @@ export class CodexAcpClient {
         return this.codexClient.accountRateLimitsRead();
     }
 
+    async readSessionHistory(sessionId: string): Promise<Thread> {
+        const response = await this.codexClient.threadRead({
+            threadId: sessionId,
+            includeTurns: true,
+        });
+        return response.thread;
+    }
+
     async resumeSession(
         request: acp.ResumeSessionRequest,
         onSubscribed?: (sessionId?: string) => void,

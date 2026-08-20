@@ -74,6 +74,10 @@ describe('CodexACPAgent - initialize', () => {
                         forkAtTurn: {
                             version: 1,
                         },
+                        readSessionHistory: {
+                            version: 1,
+                            method: "_lody/session/history/read",
+                        },
                     },
                 },
             },

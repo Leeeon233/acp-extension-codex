@@ -63,12 +63,15 @@ import {
     isExtMethodRequest,
     LEGACY_GOAL_CONTROL_METHOD,
     LEGACY_SET_SESSION_MODEL_METHOD,
+    LODY_READ_SESSION_HISTORY_CAPABILITY,
     type LegacyLoadSessionResponse,
     type LegacyNewSessionResponse,
     type LegacyResumeSessionResponse,
     type LegacySessionModelState,
     type LegacySetSessionModelRequest,
     type LegacySetSessionModelResponse,
+    type LodyReadSessionHistoryRequest,
+    type LodyReadSessionHistoryResponse,
     SESSION_STEERING_METHOD,
     type SessionSteerRequest,
     type SessionSteeringResponse,
@@ -159,6 +162,11 @@ export interface SessionState {
     sessionTitleSource: "unset" | "fallback" | "explicit" | "unknown";
     sessionFailure?: SessionFailure;
 }
+
+type HistoryProjectionState = Pick<
+    SessionState,
+    "sessionId" | "terminalOutputMode" | "sessionTitle" | "sessionTitleSource"
+>;
 
 export type SessionFailureCategory =
     | "connection" | "access" | "limit" | "request" | "service" | "unknown";
@@ -379,6 +387,7 @@ export class CodexAcpServer {
                     },
                     lody: {
                         forkAtTurn: {version: 1},
+                        readSessionHistory: LODY_READ_SESSION_HISTORY_CAPABILITY,
                     },
                 },
             },
@@ -841,6 +850,27 @@ export class CodexAcpServer {
             availableCommands,
             ...this.createSessionConfigOptionsResponse(this.getSessionState(sessionId)),
         };
+    }
+
+    async readSessionHistory(
+        params: LodyReadSessionHistoryRequest,
+    ): Promise<LodyReadSessionHistoryResponse> {
+        if (this.providerUpdate !== null) {
+            await this.providerUpdate;
+        }
+        logger.log("Reading session history...", {sessionId: params.sessionId});
+        const thread = await this.runWithProcessCheck(
+            () => this.codexAcpClient.readSessionHistory(params.sessionId),
+        );
+        const historyState: HistoryProjectionState = {
+            sessionId: params.sessionId,
+            terminalOutputMode: this.terminalOutputMode,
+            sessionTitle: null,
+            sessionTitleSource: "unset",
+        };
+        await this.streamThreadHistory(params.sessionId, thread, historyState);
+        logger.log("Session history read", {sessionId: params.sessionId});
+        return {};
     }
 
     async resumeSession(params: acp.ResumeSessionRequest): Promise<LegacyResumeSessionResponse> {
@@ -1871,19 +1901,22 @@ export class CodexAcpServer {
         };
     }
 
-    private async streamThreadHistory(sessionId: string, thread: Thread): Promise<void> {
+    private async streamThreadHistory(
+        sessionId: string,
+        thread: Thread,
+        projectionState: HistoryProjectionState = this.getSessionState(sessionId),
+    ): Promise<void> {
         const session = new ACPSessionConnection(this.connection, sessionId);
-        const sessionState = this.getSessionState(sessionId);
-        await this.publishThreadHistoryTitle(session, sessionState, thread);
+        await this.publishThreadHistoryTitle(session, projectionState, thread);
         const responseItemFallbackUpdates = await createResponseItemHistoryFallbackUpdates(
             thread,
-            sessionState.terminalOutputMode,
+            projectionState.terminalOutputMode,
         );
 
         const threadUpdates: UpdateSessionEvent[] = [];
         for (const turn of thread.turns) {
             for (const item of turn.items) {
-                const updates = await this.createHistoryUpdates(item, sessionState, turn.id);
+                const updates = await this.createHistoryUpdates(item, projectionState, turn.id);
                 threadUpdates.push(...updates);
             }
         }
@@ -1898,7 +1931,7 @@ export class CodexAcpServer {
 
     private async publishThreadHistoryTitle(
         session: ACPSessionConnection,
-        sessionState: SessionState,
+        sessionState: HistoryProjectionState,
         thread: Thread,
     ): Promise<void> {
         const explicitTitle = this.normalizeSessionTitle(thread.name);
@@ -1937,7 +1970,7 @@ export class CodexAcpServer {
     }
 
     private async publishFallbackSessionTitle(
-        sessionState: SessionState,
+        sessionState: HistoryProjectionState,
         title: string | null,
     ): Promise<void> {
         if (sessionState.sessionTitleSource !== "unset" || !title) return;
@@ -2014,7 +2047,7 @@ export class CodexAcpServer {
 
     private async createHistoryUpdates(
         item: ThreadItem,
-        sessionState: SessionState,
+        sessionState: Pick<HistoryProjectionState, "terminalOutputMode">,
         turnId: string,
     ): Promise<UpdateSessionEvent[]> {
         switch (item.type) {

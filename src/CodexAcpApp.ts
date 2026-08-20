@@ -3,6 +3,7 @@ import {z} from "zod";
 import type {CodexAcpServer} from "./CodexAcpServer";
 import {
     LEGACY_SET_SESSION_MODEL_METHOD,
+    LODY_READ_SESSION_HISTORY_METHOD,
     SESSION_STEERING_METHOD,
 } from "./AcpExtensions";
 import {registerGoalControlRequests} from "./GoalControlTransport";
@@ -21,6 +22,10 @@ const sessionSteerParamsParser = z.object({
     sessionId: z.string(),
     prompt: z.array(z.any()),
     steerId: z.string().min(1).optional(),
+}).passthrough();
+
+const lodyReadSessionHistoryParamsParser = z.object({
+    sessionId: z.string().min(1),
 }).passthrough();
 
 export interface CodexAcpAppOptions {
@@ -67,6 +72,7 @@ export function createCodexAcpApp(options: CodexAcpAppOptions): acp.AgentApp {
         .onRequest("authentication/status", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/status", ctx.params))
         .onRequest("authentication/logout", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/logout", ctx.params))
         .onRequest(LEGACY_SET_SESSION_MODEL_METHOD, legacySetSessionModelParamsParser, (ctx) => getAgent().extMethod(LEGACY_SET_SESSION_MODEL_METHOD, ctx.params))
+        .onRequest(LODY_READ_SESSION_HISTORY_METHOD, lodyReadSessionHistoryParamsParser, (ctx) => getAgent().readSessionHistory(ctx.params))
         .onRequest(SESSION_STEERING_METHOD, sessionSteerParamsParser, (ctx) => getAgent().extMethod(SESSION_STEERING_METHOD, ctx.params));
 
     return registerGoalControlRequests(agentApp, getAgent);

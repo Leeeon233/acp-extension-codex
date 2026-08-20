@@ -31,6 +31,7 @@ export const ACP_EXT_SESSION_RATE_LIMITS_METHOD = "_acp_ext:session_rate_limits"
 export const ACP_EXT_CODEX_PROPOSED_PLAN_METHOD = "_acp_ext:codex_proposed_plan";
 export const CODEX_STEER_APPLIED_METHOD = "_codex/steerApplied";
 export const SESSION_STEERING_METHOD = "_session/steering";
+export const LODY_READ_SESSION_HISTORY_METHOD = "_lody/session/history/read";
 export function getLodyForkTurnId(meta: unknown): string | null {
     if (typeof meta !== "object" || meta === null) return null;
     const lody = (meta as Record<string, unknown>)["lody"];
@@ -59,6 +60,22 @@ export const CODEX_STEER_CAPABILITY: CodexSteerCapability = {
     upstreamTurn: "same",
     configPolicy: "active",
 };
+
+export type LodyReadSessionHistoryCapability = {
+    version: 1;
+    method: typeof LODY_READ_SESSION_HISTORY_METHOD;
+}
+
+export const LODY_READ_SESSION_HISTORY_CAPABILITY: LodyReadSessionHistoryCapability = {
+    version: 1,
+    method: LODY_READ_SESSION_HISTORY_METHOD,
+};
+
+export type LodyReadSessionHistoryRequest = {
+    sessionId: SessionId;
+}
+
+export type LodyReadSessionHistoryResponse = {}
 
 export type LegacySessionModel = {
     modelId: string;
