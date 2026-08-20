@@ -42,13 +42,13 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p examples/tsconfig.json",
     "codex-test": "tsx .claude/skills/run-codex/scripts/run-codex-test.ts"
   },
-  "homepage": "https://github.com/loro-dev/acp-extension-codex#readme",
+  "homepage": "https://github.com/LodyAI/acp-extension-codex#readme",
   "bugs": {
-    "url": "https://github.com/loro-dev/acp-extension-codex/issues"
+    "url": "https://github.com/LodyAI/acp-extension-codex/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/loro-dev/acp-extension-codex.git"
+    "url": "git+https://github.com/LodyAI/acp-extension-codex.git"
   },
   "keywords": [
     "codex",

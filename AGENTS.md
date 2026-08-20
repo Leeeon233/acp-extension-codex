@@ -2,8 +2,8 @@
 
 ## Pull Requests
 
-- Always open pull requests against the `loro-dev` organization repository
-  (`loro-dev/acp-extension-codex`), not a personal fork.
+- Always open pull requests against the `LodyAI` organization repository
+  (`LodyAI/acp-extension-codex`), not a personal fork.
 
 ## Project Structure
 
