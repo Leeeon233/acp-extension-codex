@@ -34,6 +34,22 @@ export const GOAL_CONTINUATION_PROMPT: acp.ContentBlock[] = [{
     text: "Continue working toward the active goal.",
 }];
 
+/**
+ * Slash `/goal set|resume` can finish a short Codex setup turn before real work
+ * begins. The UI goal-control path starts continuation when no turn starts;
+ * slash commands must do the same when a setup turn completes, otherwise the
+ * session ends with `stopReason: end_turn` and appears idle while the goal
+ * banner stays active.
+ */
+export function resolveGoalCommandHandleResult(
+    turnCompleted: TurnCompletedNotification | null,
+): CommandHandleResult {
+    if (turnCompleted?.turn.status === "interrupted") {
+        return { handled: true, turnCompleted };
+    }
+    return { handled: false, prompt: GOAL_CONTINUATION_PROMPT };
+}
+
 export type CommandHandleOptions = {
     onTurnStartPending?: () => void;
     onTurnStarted?: (turnId: string, threadId: string) => void;
@@ -397,13 +413,7 @@ export class CodexCommands {
     }
 
     private createGoalCommandResult(turnCompleted: TurnCompletedNotification | null): CommandHandleResult {
-        if (turnCompleted === null) {
-            return { handled: false, prompt: GOAL_CONTINUATION_PROMPT };
-        }
-        return {
-            handled: true,
-            turnCompleted,
-        };
+        return resolveGoalCommandHandleResult(turnCompleted);
     }
 
     private buildReviewTarget(instructions: string): ReviewTarget {
