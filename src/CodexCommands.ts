@@ -34,6 +34,24 @@ export const GOAL_CONTINUATION_PROMPT: acp.ContentBlock[] = [{
     text: "Continue working toward the active goal.",
 }];
 
+/**
+ * Slash `/goal set|resume` can finish a short Codex setup turn before real work
+ * begins. Native Codex CLI continues active goals at idle via `on_thread_idle`;
+ * Lody's UI `_session/goal` path chains continuation when `setGoal`/`resumeGoal`
+ * return no turn. Slash commands must chain the same way when a setup turn
+ * completes (or when no turn starts), otherwise the prompt ends with
+ * `stopReason: end_turn` while the goal banner stays active. Codex may also
+ * continue internally; this adapter keeps work bound to the slash prompt lifecycle.
+ */
+export function resolveGoalCommandHandleResult(
+    turnCompleted: TurnCompletedNotification | null,
+): CommandHandleResult {
+    if (turnCompleted?.turn.status === "interrupted") {
+        return { handled: true, turnCompleted };
+    }
+    return { handled: false, prompt: GOAL_CONTINUATION_PROMPT };
+}
+
 export type CommandHandleOptions = {
     onTurnStartPending?: () => void;
     onTurnStarted?: (turnId: string, threadId: string) => void;
@@ -397,13 +415,7 @@ export class CodexCommands {
     }
 
     private createGoalCommandResult(turnCompleted: TurnCompletedNotification | null): CommandHandleResult {
-        if (turnCompleted === null) {
-            return { handled: false, prompt: GOAL_CONTINUATION_PROMPT };
-        }
-        return {
-            handled: true,
-            turnCompleted,
-        };
+        return resolveGoalCommandHandleResult(turnCompleted);
     }
 
     private buildReviewTarget(instructions: string): ReviewTarget {

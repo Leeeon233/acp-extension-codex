@@ -1669,7 +1669,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         expect(mockFixture.getAcpConnectionDump([])).toContain("Context compacted");
     });
 
-    it('handles goal slash commands through Codex app server', async () => {
+    it('chains goal continuation after slash set and resume complete setup turns', async () => {
         const { mockFixture, turnStartSpy } = setupPromptFixture();
         const goalRunSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "runGoalSet")
             .mockImplementation(async (_params, _onTurnStarted, _runtimeEffectsGraceMs, onGoalSet) => {
@@ -1713,11 +1713,37 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             status: "active",
         }, expect.any(Function));
         expect(goalClearSpy).toHaveBeenCalledWith({ threadId: "session-id" });
+        expect(turnStartSpy).toHaveBeenCalledTimes(2);
+        expect(turnStartSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            input: [expect.objectContaining({ text: "Continue working toward the active goal." })],
+        }));
+        expect(turnStartSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            input: [expect.objectContaining({ text: "Continue working toward the active goal." })],
+        }));
+    });
+
+    it('does not chain goal continuation when slash setup turn was interrupted', async () => {
+        const { mockFixture, turnStartSpy } = setupPromptFixture();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "runGoalSet")
+            .mockImplementation(async (_params, _onTurnStarted, _runtimeEffectsGraceMs, onGoalSet) => {
+                onGoalSet?.(createThreadGoal());
+                return {
+                    threadId: "session-id",
+                    turn: createTurn("goal-turn-id", "interrupted"),
+                };
+            });
+
+        const response = await mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "/goal Ship the migration and keep tests green" }],
+        });
+
+        expect(response.stopReason).toBe("cancelled");
         expect(turnStartSpy).not.toHaveBeenCalled();
     });
 
     it('waits for goal slash command turn routing', async () => {
-        const { mockFixture } = setupPromptFixture();
+        const { mockFixture, turnStartSpy } = setupPromptFixture();
         const goal = createThreadGoal();
         vi.spyOn(mockFixture.getCodexAppServerClient(), "threadGoalSet")
             .mockResolvedValue({ goal });
@@ -1796,7 +1822,10 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         await expect(promptPromise).resolves.toEqual(expect.objectContaining({
             stopReason: "end_turn",
         }));
-        expect(awaitTurnCompletedSpy).not.toHaveBeenCalled();
+        expect(turnStartSpy).toHaveBeenCalledWith(expect.objectContaining({
+            input: [expect.objectContaining({ text: "Continue working toward the active goal." })],
+        }));
+        expect(awaitTurnCompletedSpy).toHaveBeenCalledWith("session-id", "turn-id");
     });
 
     it('does not complete no-turn goal slash command before the goal update and runtime grace are handled', async () => {
@@ -1862,7 +1891,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
     });
 
     it('completes goal slash command when a turn routes after the goal update', async () => {
-        const { mockFixture } = setupPromptFixture();
+        const { mockFixture, turnStartSpy } = setupPromptFixture();
         const goal = createThreadGoal({updatedAt: 1710000150});
         const threadGoalSetSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "threadGoalSet")
             .mockResolvedValue({ goal });
@@ -1920,7 +1949,10 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             stopReason: "end_turn",
         }));
         expect(promptResolved).toBe(true);
-        expect(awaitTurnCompletedSpy).not.toHaveBeenCalled();
+        expect(turnStartSpy).toHaveBeenCalledWith(expect.objectContaining({
+            input: [expect.objectContaining({ text: "Continue working toward the active goal." })],
+        }));
+        expect(awaitTurnCompletedSpy).toHaveBeenCalledWith("session-id", "turn-id");
     });
 
     it('waits for goal turn completion after the goal completes before streamed output finishes', async () => {
