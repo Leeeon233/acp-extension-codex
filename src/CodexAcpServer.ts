@@ -259,6 +259,7 @@ interface ActivePrompt {
     cancelSignal: Promise<null>;
     signal: AbortSignal;
     currentTurn: { threadId: string, turnId: string } | null;
+    compactionInFlight: boolean;
     requestCancel: () => void;
     requestClose: () => void;
     complete: () => void;
@@ -2771,6 +2772,7 @@ export class CodexAcpServer {
             cancelSignal,
             signal: abortController.signal,
             currentTurn: null,
+            compactionInFlight: false,
             requestCancel: () => {
                 if (abortController.signal.aborted) {
                     return;
@@ -3119,6 +3121,12 @@ export class CodexAcpServer {
                     sessionState.currentTurnId = turnId;
                     pendingTurnStart?.resolve(turnId);
                     onTurnStarted?.();
+                },
+                onCompactionStarted: () => {
+                    activePrompt.compactionInFlight = true;
+                },
+                onCompactionFinished: () => {
+                    activePrompt.compactionInFlight = false;
                 },
                 setConfigOption: async (configId, value) => {
                     await this.applySessionConfigOption(sessionState, {
@@ -3598,6 +3606,16 @@ export class CodexAcpServer {
         const sessionState = this.sessions.get(params.sessionId);
         if (!sessionState) {
             logger.log("Cancel request rejected: session not found", {sessionId: params.sessionId});
+            return;
+        }
+
+        // `/compact` is a non-turn command.  It keeps the ACP prompt open while
+        // waiting for `thread/compacted`, but Codex has no turn id to interrupt.
+        // Abort the owning prompt directly so the next prompt is not rejected as
+        // "A Codex prompt is already active" after the user stops compaction.
+        const activePrompt = this.activePrompts.get(params.sessionId);
+        if (activePrompt?.compactionInFlight === true) {
+            activePrompt.requestCancel();
             return;
         }
 

@@ -54,6 +54,8 @@ export function resolveGoalCommandHandleResult(
 export type CommandHandleOptions = {
     onTurnStartPending?: () => void;
     onTurnStarted?: (turnId: string, threadId: string) => void;
+    onCompactionStarted?: () => void;
+    onCompactionFinished?: () => void;
     setConfigOption?: (configId: string, value: string | boolean) => Promise<void>;
 };
 
@@ -262,8 +264,13 @@ export class CodexCommands {
                 return { handled: options.setConfigOption !== undefined };
             }
             case "compact": {
-                await this.runWithProcessCheck(() => this.codexAcpClient.runCompact(sessionId));
-                return { handled: true };
+                options.onCompactionStarted?.();
+                try {
+                    await this.runWithProcessCheck(() => this.codexAcpClient.runCompact(sessionId));
+                    return { handled: true };
+                } finally {
+                    options.onCompactionFinished?.();
+                }
             }
             case "goal": {
                 return await this.runGoalCommand(sessionState, command.rest, options);
