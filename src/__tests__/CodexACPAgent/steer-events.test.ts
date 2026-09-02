@@ -19,12 +19,18 @@ function createTurn(id: string, status: "inProgress" | "completed" | "interrupte
     };
 }
 
-function deferred<T>(): {promise: Promise<T>, resolve: (value: T) => void} {
+function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: unknown) => void;
+} {
     let resolve: (value: T) => void = () => {};
-    const promise = new Promise<T>((innerResolve) => {
+    let reject: (error: unknown) => void = () => {};
+    const promise = new Promise<T>((innerResolve, innerReject) => {
         resolve = innerResolve;
+        reject = innerReject;
     });
-    return {promise, resolve};
+    return {promise, resolve, reject};
 }
 
 /**
@@ -38,10 +44,14 @@ function startActiveTurn(sessionOverrides?: Partial<SessionState>) {
         turn: createTurn("turn-id", "inProgress"),
     });
     const turnCompleted = deferred<TurnCompletedNotification>();
+    const turnActive = deferred<void>();
     vi.spyOn(mockFixture.getCodexAppServerClient(), "awaitTurnCompleted")
-        .mockReturnValue(turnCompleted.promise);
+        .mockImplementation(() => {
+            turnActive.resolve();
+            return turnCompleted.promise;
+        });
     vi.spyOn(mockFixture.getCodexAcpAgent(), "getSessionState").mockReturnValue(sessionState);
-    return {mockFixture, sessionState, turnCompleted};
+    return {mockFixture, sessionState, turnCompleted, turnActive};
 }
 
 describe('_lody/session/steer', () => {
@@ -50,7 +60,7 @@ describe('_lody/session/steer', () => {
     });
 
     it('reports injected when the input joins the active turn', async () => {
-        const {mockFixture, sessionState, turnCompleted} = startActiveTurn();
+        const {mockFixture, sessionState, turnCompleted, turnActive} = startActiveTurn();
         const turnSteerSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer")
             .mockResolvedValue({turnId: "turn-id"});
 
@@ -58,9 +68,8 @@ describe('_lody/session/steer', () => {
             sessionId: "session-id",
             prompt: [{type: "text", text: "long running prompt"}],
         });
-        await vi.waitFor(() => {
-            expect(sessionState.currentTurnId).toBe("turn-id");
-        });
+        await turnActive.promise;
+        expect(sessionState.currentTurnId).toBe("turn-id");
 
         await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
             sessionId: "session-id",
@@ -101,40 +110,146 @@ describe('_lody/session/steer', () => {
         expect(turnStartSpy).not.toHaveBeenCalled();
     });
 
-    it('fails when Codex reports that the tracked turn is no longer active', async () => {
-        const {mockFixture, sessionState, turnCompleted} = startActiveTurn();
-        const nextTurnCompleted = deferred<TurnCompletedNotification>();
-        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnStart")
-            .mockResolvedValueOnce({turn: createTurn("turn-id", "inProgress")})
-            .mockResolvedValueOnce({turn: createTurn("new-turn-id", "inProgress")});
-        vi.spyOn(mockFixture.getCodexAppServerClient(), "awaitTurnCompleted")
-            .mockReturnValueOnce(turnCompleted.promise)
-            .mockReturnValueOnce(nextTurnCompleted.promise);
-        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(async () => {
-            turnCompleted.resolve({
-                threadId: "session-id",
-                turn: createTurn("turn-id", "completed"),
-            });
-            throw Object.assign(new Error("Internal error"), {
-                data: {details: "no active turn to steer"},
-            });
+    it('reports failed when turn completion arrives before the explicit refusal', async () => {
+        const {mockFixture, sessionState, turnCompleted, turnActive} = startActiveTurn();
+        const steerResponse = deferred<{turnId: string}>();
+        const steerRequested = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(() => {
+            steerRequested.resolve();
+            return steerResponse.promise;
         });
 
         const promptPromise = mockFixture.getCodexAcpAgent().prompt({
             sessionId: "session-id",
             prompt: [{type: "text", text: "long running prompt"}],
         });
-        await vi.waitFor(() => {
-            expect(sessionState.currentTurnId).toBe("turn-id");
-        });
+        await turnActive.promise;
 
-        await expect(mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+        const steerPromise = mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
             sessionId: "session-id",
             prompt: [{type: "text", text: "racing follow-up"}],
             steerId: "steer-race",
-        })).resolves.toEqual({outcome: "failed"});
+        });
+        await steerRequested.promise;
+        turnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("turn-id", "completed"),
+        });
         await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
         expect(sessionState.currentTurnId).toBeNull();
+        steerResponse.reject(Object.assign(new Error("Internal error"), {
+            data: {details: "no active turn to steer"},
+        }));
+        await expect(steerPromise).resolves.toEqual({outcome: "failed"});
+    });
+
+    it('reports failed when the explicit refusal arrives before turn completion', async () => {
+        const {mockFixture, turnCompleted, turnActive} = startActiveTurn();
+        const steerResponse = deferred<{turnId: string}>();
+        const steerRequested = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(() => {
+            steerRequested.resolve();
+            return steerResponse.promise;
+        });
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await turnActive.promise;
+        const steerPromise = mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "racing follow-up"}],
+            steerId: "steer-race-refusal-first",
+        });
+        await steerRequested.promise;
+        steerResponse.reject(Object.assign(new Error("Internal error"), {
+            data: {details: "no active turn to steer"},
+        }));
+        await expect(steerPromise).resolves.toEqual({outcome: "failed"});
+
+        turnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("turn-id", "completed"),
+        });
+        await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
+    });
+
+    it('lets matching application evidence win over a later request failure', async () => {
+        const {mockFixture, turnCompleted, turnActive} = startActiveTurn();
+        const steerResponse = deferred<{turnId: string}>();
+        const steerRequested = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(() => {
+            steerRequested.resolve();
+            return steerResponse.promise;
+        });
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await turnActive.promise;
+        const steerPromise = mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "applied despite response failure"}],
+            steerId: "steer-applied-before-error",
+        });
+        await steerRequested.promise;
+        mockFixture.sendServerNotification({
+            method: "item/completed",
+            params: {
+                threadId: "session-id",
+                turnId: "turn-id",
+                completedAtMs: 1,
+                item: {
+                    type: "userMessage",
+                    id: "item-steer-applied",
+                    clientId: "steer-applied-before-error",
+                    content: [{
+                        type: "text",
+                        text: "applied despite response failure",
+                        text_elements: [],
+                    }],
+                },
+            },
+        });
+        await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
+
+        turnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("turn-id", "completed"),
+        });
+        await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
+        steerResponse.reject(new Error("connection closed before steer response"));
+        await expect(steerPromise).resolves.toEqual({outcome: "injected"});
+    });
+
+    it('throws a turn/steer internal failure without application evidence', async () => {
+        const {mockFixture, turnCompleted, turnActive} = startActiveTurn();
+        const steerRequested = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "turnSteer").mockImplementation(() => {
+            steerRequested.resolve();
+            return Promise.reject(new Error("unexpected turn/steer failure"));
+        });
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "long running prompt"}],
+        });
+        await turnActive.promise;
+        const steerPromise = mockFixture.getCodexAcpAgent().extMethod(SESSION_STEERING_METHOD, {
+            sessionId: "session-id",
+            prompt: [{type: "text", text: "ambiguous steer"}],
+            steerId: "steer-internal-error",
+        });
+        await steerRequested.promise;
+        await expect(steerPromise).rejects.toThrow("unexpected turn/steer failure");
+
+        turnCompleted.resolve({
+            threadId: "session-id",
+            turn: createTurn("turn-id", "completed"),
+        });
+        await expect(promptPromise).resolves.toMatchObject({stopReason: "end_turn"});
     });
 
     it('rejects concurrent late steering requests without creating a turn', async () => {
@@ -167,7 +282,7 @@ describe('_lody/session/steer', () => {
         expect(turnSteerSpy).not.toHaveBeenCalled();
     });
 
-    it('reports failed instead of throwing when steering hits an unexpected error', async () => {
+    it('throws when steering hits an unexpected error before non-application is proven', async () => {
         const mockFixture = createCodexMockTestFixture();
         vi.spyOn(mockFixture.getCodexAcpAgent(), "getSessionState").mockImplementation(() => {
             throw new Error("unexpected boom");
@@ -177,7 +292,7 @@ describe('_lody/session/steer', () => {
             sessionId: "session-id",
             prompt: [{type: "text", text: "keep the agent alive"}],
             steerId: "steer-error",
-        })).resolves.toEqual({outcome: "failed"});
+        })).rejects.toThrow("unexpected boom");
     });
 
     it('rejects malformed steer params', async () => {

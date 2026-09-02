@@ -252,6 +252,8 @@ interface ActivePrompt {
 interface PendingSteer {
     activePrompt: ActivePrompt;
     turnId: string;
+    applied: boolean;
+    requestSettled: boolean;
 }
 
 export interface CodexProcessState {
@@ -1377,7 +1379,7 @@ export class CodexAcpServer {
                 throw error;
             }
             logger.error(`Steering request for session ${params.sessionId} failed`, error);
-            return {outcome: "failed"};
+            throw error;
         } finally {
             if (queue.isIdle && this.steeringQueues.get(params.sessionId) === queue) {
                 this.steeringQueues.delete(params.sessionId);
@@ -1417,7 +1419,7 @@ export class CodexAcpServer {
 
         const turnId = await this.getSteerableTurnId(sessionState);
         if (turnId) {
-            const injected = await this.injectSteerIntoActiveTurn(params, turnId, sessionState);
+            const injected = await this.injectSteerIntoActiveTurn(params, turnId);
             if (injected) {
                 logger.log("Steering session injected", {sessionId: params.sessionId, turnId});
                 return {outcome: "injected"};
@@ -1440,10 +1442,9 @@ export class CodexAcpServer {
     /**
      * Attempts to inject the prompt into the given running turn.
      *
-     * A failed injection is fatal only when the turn is still the session's
-     * current turn and Codex reported something other than "no active turn to
-     * steer". Otherwise the turn has already ended underneath us and steering
-     * reports a failed delivery.
+     * Application evidence wins over a request failure. Without that evidence,
+     * only Codex's explicit "no active turn to steer" answer proves the prompt
+     * was not applied; every other error remains delivery-ambiguous.
      *
      * @returns true when the prompt was injected; false when the target turn
      *     already ended.
@@ -1451,7 +1452,6 @@ export class CodexAcpServer {
     private async injectSteerIntoActiveTurn(
         params: SessionSteerRequest,
         turnId: string,
-        sessionState: SessionState,
     ): Promise<boolean> {
         const activePrompt = this.activePrompts.get(params.sessionId);
         const activeTurn = activePrompt?.currentTurn;
@@ -1472,7 +1472,13 @@ export class CodexAcpServer {
         if (pending.has(params.steerId)) {
             throw RequestError.invalidRequest(`Duplicate Codex steer id: ${params.steerId}`);
         }
-        pending.set(params.steerId, {activePrompt, turnId});
+        const pendingSteer: PendingSteer = {
+            activePrompt,
+            turnId,
+            applied: false,
+            requestSettled: false,
+        };
+        pending.set(params.steerId, pendingSteer);
         this.pendingSteers.set(params.sessionId, pending);
 
         try {
@@ -1488,18 +1494,28 @@ export class CodexAcpServer {
                     `Codex steered unexpected turn ${response.turnId}; expected ${turnId}`,
                 );
             }
-            return true;
-        } catch (err) {
-            if (pending.get(params.steerId)?.activePrompt === activePrompt) {
+            pendingSteer.requestSettled = true;
+            if (pendingSteer.applied && pending.get(params.steerId) === pendingSteer) {
                 pending.delete(params.steerId);
                 if (pending.size === 0) this.pendingSteers.delete(params.sessionId);
             }
+            return true;
+        } catch (err) {
             await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
-            const turnStillActive = sessionState.currentTurnId === turnId;
-            if (turnStillActive && !this.isNoActiveTurnToSteerError(err)) {
-                throw err;
+            const current = pending.get(params.steerId);
+            if (current === pendingSteer && current.applied) {
+                pending.delete(params.steerId);
+                if (pending.size === 0) this.pendingSteers.delete(params.sessionId);
+                return true;
             }
-            return false;
+            if (current === pendingSteer) {
+                pending.delete(params.steerId);
+                if (pending.size === 0) this.pendingSteers.delete(params.sessionId);
+            }
+            if (this.isNoActiveTurnToSteerError(err)) {
+                return false;
+            }
+            throw err;
         }
     }
 
@@ -2292,7 +2308,10 @@ export class CodexAcpServer {
         const pending = this.pendingSteers.get(sessionId);
         if (!pending) return;
         for (const [steerId, steer] of pending) {
-            if (steer.activePrompt === activePrompt) pending.delete(steerId);
+            // An unsettled request may still return an explicit refusal after
+            // the turn-completed event. Retain it long enough for its catch
+            // path to drain notifications and make the final classification.
+            if (steer.activePrompt === activePrompt && steer.requestSettled) pending.delete(steerId);
         }
         if (pending.size === 0) this.pendingSteers.delete(sessionId);
     }
@@ -2309,9 +2328,12 @@ export class CodexAcpServer {
         if (!pending) return;
         const steer = pending.get(steerId);
         if (!steer || steer.activePrompt !== activePrompt || steer.turnId !== event.params.turnId) return;
-        pending.delete(steerId);
-        if (pending.size === 0) this.pendingSteers.delete(sessionId);
+        steer.applied = true;
         await this.connection.notify(CODEX_STEER_APPLIED_METHOD, {sessionId, steerId});
+        if (steer.requestSettled && pending.get(steerId) === steer) {
+            pending.delete(steerId);
+            if (pending.size === 0) this.pendingSteers.delete(sessionId);
+        }
     }
 
     private cancelBeforeTurnStarted(activePrompt: ActivePrompt): Promise<null> {

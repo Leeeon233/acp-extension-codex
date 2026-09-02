@@ -36,6 +36,13 @@
 - Codex app-server usage: see https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md when touching protocol/transport details, adding or consuming JSON-RPC methods, handling approvals/turn events, or updating generated schema/clients.
 - App-server events: prefer `thread/*`, `turn/*`, and `item/*` event surfaces; avoid the deprecated `codex/event/*` API (planned removal). Keep implementations aligned with generated types in `src/app-server` (including `v2` exports).
 - Steer uses app-server `turn/steer` on the tracked active turn. Correlate `clientUserMessageId` and acknowledge only the matching `item/completed(userMessage)`; never emulate steer with a second `turn/start`.
+  A Core steer response of `outcome: "failed"` is a conclusive negative
+  acknowledgement: return it only when the adapter can prove the prompt was
+  not applied (currently an absent active turn or Codex's explicit "no active
+  turn to steer" answer). Drain queued session notifications before classifying
+  a `turn/steer` error, and let a matching completed user message win over that
+  error. Transport/internal failures without application evidence must throw;
+  callers must not automatically replay an ambiguous prompt.
 - Session fork uses app-server `thread/fork` and installs the returned child as an independent ACP
   session. Agent message updates expose their Codex turn id as `_meta.lody.turnId`;
   `_meta.lody.forkAtTurn.turnId` is passed directly to `thread/fork.lastTurnId`. Do not maintain
