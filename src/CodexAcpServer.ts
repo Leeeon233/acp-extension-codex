@@ -1926,12 +1926,56 @@ export class CodexAcpServer {
 
     private createSessionConfigOptionsResponse(sessionState: SessionState): {
         configOptions?: Array<acp.SessionConfigOption>;
+        _meta?: Record<string, unknown>;
     } {
         if (!this.isSessionConfigEnabled()) {
             return {};
         }
         return {
             configOptions: this.createSessionConfigOptions(sessionState),
+            ...this.createModelCapabilitiesMeta(sessionState),
+        };
+    }
+
+    /**
+     * Publishes what each model can do, not just what the current one can.
+     *
+     * `configOptions` is rebuilt per model — `fast-mode` appears only while the
+     * current model has a fast speed tier, and the effort list is that model's —
+     * so a client reading it learns nothing about any other model, and there is
+     * no ACP request that asks. This data is already in hand here, from the same
+     * `Model` objects those options are built from; dropping it forced clients to
+     * guess or to refuse selections that are perfectly valid.
+     *
+     * Self-declared and advisory: it describes this account's catalog at this
+     * moment, and the live session state remains the authority.
+     */
+    private createModelCapabilitiesMeta(sessionState: SessionState): {
+        _meta?: Record<string, unknown>;
+    } {
+        const models = sessionState.availableModels;
+        if (models.length === 0) {
+            return {};
+        }
+        return {
+            _meta: {
+                lody: {
+                    modelCapabilities: {
+                        version: 1,
+                        models: Object.fromEntries(
+                            models.map((model) => [
+                                model.id,
+                                {
+                                    effortValues: model.supportedReasoningEfforts.map(
+                                        (effort) => effort.reasoningEffort,
+                                    ),
+                                    fastMode: modelSupportsFast(model),
+                                },
+                            ]),
+                        ),
+                    },
+                },
+            },
         };
     }
 
