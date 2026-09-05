@@ -59,6 +59,7 @@ function toAcpStatus(status: CodexItemStatus): AcpToolCallStatus {
             return "completed";
         case "failed":
         case "declined":
+        case "interrupted":
             return "failed";
     }
 }
@@ -540,6 +541,8 @@ function formatSubAgentActivityTitle(kind: SubAgentActivityItem["kind"], name: s
             return `Interact with subagent ${name}`;
         case "interrupted":
             return `Interrupt subagent ${name}`;
+        case "completed":
+            return `Complete subagent ${name}`;
     }
 }
 
@@ -717,6 +720,8 @@ function createGuardianApprovalReviewActionSummary(action: GuardianApprovalRevie
             const command = action.argv.length > 0 ? action.argv : [action.program];
             return `${guardianCommandSourceLabel(action.source)} ${shellJoin(command)}`;
         }
+        case "writeStdin":
+            return `write stdin to process ${action.processId}`;
         case "applyPatch":
             if (action.files.length === 1) {
                 return `apply_patch touching ${action.files[0]}`;

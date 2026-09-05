@@ -3,55 +3,58 @@ import type {SessionConfigOption, SessionMode, SessionModeState} from "@agentcli
 
 export const MODE_CONFIG_ID = "mode";
 
+type AgentModeKind = "plan" | "auto_review" | "standard" | "full_access";
+
 export class AgentMode {
     readonly id: string;
     readonly name: string;
     readonly description: string;
+    readonly kind: AgentModeKind;
     readonly approvalPolicy: AskForApproval;
+    readonly approvalsReviewer: ApprovalsReviewer;
     readonly sandboxPolicy: SandboxPolicy;
     readonly sandboxMode: SandboxMode;
-    readonly approvalsReviewer: ApprovalsReviewer;
 
-    private constructor(id: string, name: string, description: string, approval: AskForApproval, sandbox: SandboxPolicy, sandboxMode: SandboxMode, approvalsReviewer: ApprovalsReviewer = "user") {
+    private constructor(
+        id: string,
+        name: string,
+        description: string,
+        kind: AgentModeKind,
+        approvalPolicy: AskForApproval,
+        approvalsReviewer: ApprovalsReviewer,
+        sandboxPolicy: SandboxPolicy,
+        sandboxMode: SandboxMode,
+    ) {
         this.id = id;
         this.name = name;
         this.description = description;
-        this.approvalPolicy = approval;
-        this.sandboxPolicy = sandbox;
-        this.sandboxMode = sandboxMode; // same as sandboxPolicy, need to look for
+        this.kind = kind;
+        this.approvalPolicy = approvalPolicy;
         this.approvalsReviewer = approvalsReviewer;
+        this.sandboxPolicy = sandboxPolicy;
+        this.sandboxMode = sandboxMode; // same as sandboxPolicy, need to look for
     }
 
     static readonly ReadOnly = new AgentMode(
         "read-only",
         "Read-only",
         "Requires approval to edit files and run commands.",
+        "standard",
         "on-request",
+        "user",
         {
-            "type": "readOnly",
-            "networkAccess": false
+            type: "readOnly",
+            networkAccess: false,
         },
-        "read-only"
+        "read-only",
     );
     static readonly Agent = new AgentMode(
         "agent",
         "Agent",
         "Read and edit files, and run commands.",
+        "standard",
         "on-request",
-        {
-            type: "workspaceWrite",
-            writableRoots: [],
-            networkAccess: false,
-            excludeTmpdirEnvVar: false,
-            excludeSlashTmp: false
-        },
-        "workspace-write"
-    );
-    static readonly AgentAutoReview = new AgentMode(
-        "agent-auto-review",
-        "Agent (auto review)",
-        "Read and edit files, and run commands. Approval requests are reviewed automatically by a Codex subagent.",
-        "on-request",
+        "user",
         {
             type: "workspaceWrite",
             writableRoots: [],
@@ -60,15 +63,32 @@ export class AgentMode {
             excludeSlashTmp: false
         },
         "workspace-write",
-        "auto_review"
+    );
+    static readonly AgentAutoReview = new AgentMode(
+        "agent-auto-review",
+        "Agent (auto review)",
+        "Read and edit files, and run commands. Approval requests are reviewed automatically by a Codex subagent.",
+        "auto_review",
+        "on-request",
+        "auto_review",
+        {
+            type: "workspaceWrite",
+            writableRoots: [],
+            networkAccess: false,
+            excludeTmpdirEnvVar: false,
+            excludeSlashTmp: false
+        },
+        "workspace-write",
     );
     static readonly AgentFullAccess = new AgentMode(
         "agent-full-access",
         "Agent (full access)",
         "Codex can edit files outside this workspace and run commands with network access. Exercise caution when using.",
+        "full_access",
         "never",
+        "user",
         {"type": "dangerFullAccess"},
-        "danger-full-access"
+        "danger-full-access",
     );
 
     static DEFAULT_AGENT_MODE = AgentMode.Agent;
@@ -78,6 +98,7 @@ export class AgentMode {
             id: this.id,
             name: this.name,
             description: this.description,
+            _meta: {kind: this.kind},
         };
     }
 
@@ -100,6 +121,7 @@ export class AgentMode {
                 value: mode.id,
                 name: mode.name,
                 description: mode.description,
+                _meta: {kind: mode.kind},
             })),
         };
     }
