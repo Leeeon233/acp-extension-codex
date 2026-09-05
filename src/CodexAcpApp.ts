@@ -8,6 +8,7 @@ import {
     SESSION_STEERING_METHOD,
 } from "./AcpExtensions";
 import {registerGoalControlRequests} from "./GoalControlTransport";
+import {ASYNC_TASK_STOP_METHOD} from "./async-tasks/AsyncTaskExtension";
 
 const emptyExtensionParamsParser = z.preprocess(
     (params) => params ?? {},
@@ -33,6 +34,11 @@ const lodyRateLimitsGetParamsParser = z.object({
     sessionId: z.string().optional(),
     accountId: z.string().optional(),
     modelId: z.string().optional(),
+}).passthrough();
+
+const asyncTaskStopParamsParser = z.object({
+    sessionId: z.string().trim().min(1),
+    asyncTaskId: z.string().trim().min(1),
 }).passthrough();
 
 export interface CodexAcpAppOptions {
@@ -62,7 +68,7 @@ export function createCodexAcpApp(options: CodexAcpAppOptions): acp.AgentApp {
         .onRequest(acp.methods.agent.initialize, (ctx) => getAgent().initialize(ctx.params))
         .onRequest(acp.methods.agent.session.new, (ctx) => getAgent().newSession(ctx.params))
         .onRequest(acp.methods.agent.session.load, (ctx) => getAgent().loadSession(ctx.params))
-        .onRequest(acp.methods.agent.session.fork, (ctx) => getAgent().unstable_forkSession(ctx.params))
+        .onRequest(acp.methods.agent.session.fork, (ctx) => getAgent().forkSession(ctx.params))
         .onRequest(acp.methods.agent.session.list, (ctx) => getAgent().listSessions(ctx.params))
         .onRequest(acp.methods.agent.session.delete, (ctx) => getAgent().deleteSession(ctx.params))
         .onRequest(acp.methods.agent.session.resume, (ctx) => getAgent().resumeSession(ctx.params))
@@ -81,7 +87,8 @@ export function createCodexAcpApp(options: CodexAcpAppOptions): acp.AgentApp {
         .onRequest(LEGACY_SET_SESSION_MODEL_METHOD, legacySetSessionModelParamsParser, (ctx) => getAgent().extMethod(LEGACY_SET_SESSION_MODEL_METHOD, ctx.params))
         .onRequest(LODY_RATE_LIMITS_GET_METHOD, lodyRateLimitsGetParamsParser, () => getAgent().readRateLimits())
         .onRequest(LODY_READ_SESSION_HISTORY_METHOD, lodyReadSessionHistoryParamsParser, (ctx) => getAgent().readSessionHistory(ctx.params))
-        .onRequest(SESSION_STEERING_METHOD, sessionSteerParamsParser, (ctx) => getAgent().extMethod(SESSION_STEERING_METHOD, ctx.params));
+        .onRequest(SESSION_STEERING_METHOD, sessionSteerParamsParser, (ctx) => getAgent().extMethod(SESSION_STEERING_METHOD, ctx.params))
+        .onRequest(ASYNC_TASK_STOP_METHOD, asyncTaskStopParamsParser, (ctx) => getAgent().extMethod(ASYNC_TASK_STOP_METHOD, ctx.params));
 
     return registerGoalControlRequests(agentApp, getAgent);
 }

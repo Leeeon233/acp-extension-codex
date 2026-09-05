@@ -18,6 +18,7 @@ import {
     type SessionUsageExtNotification,
 } from "./AcpExtensions";
 import type {
+    AccountUpdatedNotification,
     AgentMessageDeltaNotification,
     CodexErrorInfo,
     CommandExecutionOutputDeltaNotification,
@@ -47,8 +48,6 @@ import type { McpStartupCompleteEvent } from "./app-server/McpStartupCompleteEve
 import {toTokenCount} from "./TokenCount";
 import {
     commandExecutionUsesTerminalOutput,
-    createCollabAgentToolCallCompleteUpdate,
-    createCollabAgentToolCallUpdate,
     createCommandExecutionUpdate,
     createContextCompactionCompleteUpdate,
     createContextCompactionStartUpdate,
@@ -65,7 +64,6 @@ import {
     createFuzzyFileSearchComplete,
     createFuzzyFileSearchStartOrUpdate,
     createMcpToolCallUpdate,
-    createSubAgentActivityUpdate,
     createWebSearchCompleteUpdate,
     createWebSearchStartUpdate,
     fuzzyFileSearchToolCallId,
@@ -90,6 +88,9 @@ import {
     AIR_SESSION_FAILURE_KEY,
     JETBRAINS_META_KEY,
 } from "./AirExtension";
+import {CodexSubagentEventRouter} from "./subagents/CodexSubagentEventRouter";
+import type {SubagentState} from "./subagents/AcpSubagents";
+import {mergeRateLimitSnapshot} from "./RateLimitsMap";
 
 const PROVIDER_ERROR_TEXT_MAX_CHARS = 4_096;
 const INTERNAL_INSTRUCTION_MARKERS = [
@@ -200,6 +201,7 @@ const STRING_CODEX_ERROR_CATEGORIES = {
     contextWindowExceeded: "context_exhausted",
     sessionBudgetExceeded: "budget_exhausted",
     usageLimitExceeded: "quota_exhausted",
+    rateLimitExceeded: "rate_limited",
     serverOverloaded: "overloaded",
     cyberPolicy: "policy_denied",
     misalignmentPolicyViolation: "policy_denied",
@@ -253,7 +255,9 @@ export class CodexEventHandler {
     private readonly terminalCommandIds = new Set<string>();
     private readonly terminalCommandOutputIds = new Set<string>();
     private readonly agentMessagePhases = new Map<string, string | null>();
-    private readonly activeSubAgentActivities = new Set<string>();
+    private readonly subagents: CodexSubagentEventRouter;
+    /** Connection-level `authStatus` sink; the app-server account push feeds it. */
+    private readonly onAccountUpdated: ((notification: AccountUpdatedNotification) => void) | undefined;
 
     constructor(
         connection: AcpClientConnection,
@@ -261,13 +265,21 @@ export class CodexEventHandler {
         supportsPlanUpdates = false,
         supportsTypedSessionFailures = false,
         sessionFailureEpoch: string = randomUUID(),
+        subagents: CodexSubagentEventRouter = new CodexSubagentEventRouter(
+            sessionState.sessionId,
+            false,
+            new ACPSessionConnection(connection, sessionState.sessionId),
+        ),
+        onAccountUpdated?: (notification: AccountUpdatedNotification) => void,
     ) {
         this.connection = connection;
+        this.onAccountUpdated = onAccountUpdated;
         this.sessionState = sessionState;
         this.supportsPlanUpdates = supportsPlanUpdates;
         this.supportsTypedSessionFailures = supportsTypedSessionFailures;
         this.sessionFailureEpoch = sessionFailureEpoch;
         this.session = new ACPSessionConnection(connection, sessionState.sessionId);
+        this.subagents = subagents;
         if (sessionState.sessionFailure !== undefined) {
             this.failuresById.set(sessionState.sessionFailure.id, sessionState.sessionFailure);
         }
@@ -378,6 +390,7 @@ export class CodexEventHandler {
             message: "Turn failed",
             codexErrorInfo: null,
             additionalDetails: null,
+            misalignment: null,
         });
         this.recordTypedSessionFailure({
             threadId: this.sessionState.sessionId,
@@ -399,11 +412,54 @@ export class CodexEventHandler {
             return;
         }
         await this.flushPendingErrors();
-        const updateEvent = await this.createUpdateEvent(notification);
+        const closingChildren = this.subagents.closingChildSessions(notification);
+        for (const child of closingChildren) {
+            await this.sessionState.asyncTasks.reconcile(child.threadId, child.sessionId);
+        }
+        const handledBySubagents = await this.subagents.handle(notification);
+        for (const buffered of this.subagents.takeBufferedNotifications()) {
+            await this.handleNotification(buffered);
+        }
+        const ignoredBySubagents = !handledBySubagents && this.subagents.shouldIgnore(notification);
+        let updateEvent: UpdateSessionEvent | null | undefined;
+        if (!handledBySubagents
+            && !ignoredBySubagents
+            && notification.method === "item/started"
+            && notification.params.item.type === "commandExecution") {
+            updateEvent = await this.createUpdateEvent(notification);
+        }
+        if (!handledBySubagents) {
+            await this.sessionState.asyncTasks.handleNotification(
+                notification,
+                this.subagents.notificationSessionId(notification),
+                toolCallTitle(updateEvent),
+            );
+        }
+        if (handledBySubagents) {
+            await this.emitExtNotification(notification);
+            return;
+        }
+        if (ignoredBySubagents) {
+            await this.emitExtNotification(notification);
+            return;
+        }
+        if (updateEvent === undefined) updateEvent = await this.createUpdateEvent(notification);
         if (updateEvent) {
-            await this.session.update(updateEvent);
+            await this.session.update(updateEvent, this.subagents.notificationSessionId(notification));
         }
         await this.emitExtNotification(notification);
+    }
+
+    async waitForNativeSubagentSession(childThreadId: string): Promise<string | null> {
+        return await this.subagents.waitForMaterializedSession(childThreadId);
+    }
+
+    async waitForNativeSubagents(signal: AbortSignal): Promise<void> {
+        await this.subagents.wait(signal);
+    }
+
+    async finishOutstandingNativeSubagents(state: SubagentState): Promise<void> {
+        await this.subagents.finishOutstanding(state);
     }
 
     async flushPendingPlanUpdates(): Promise<void> {
@@ -514,6 +570,9 @@ export class CodexEventHandler {
                 return this.createMcpToolProgressEvent(notification.params);
             case "account/rateLimits/updated":
                 return null;
+            case "account/updated":
+                this.onAccountUpdated?.(notification.params);
+                return null;
             case "configWarning":
                 return await this.createConfigWarningEvent(notification.params);
             case "warning":
@@ -553,6 +612,8 @@ export class CodexEventHandler {
             case "thread/deleted":
             case "thread/reverted":
             case "thread/queue/changed":
+            case "project/changed":
+            case "thread/project/updated":
             case "thread/environment/connected":
             case "thread/environment/disconnected":
             case "command/exec/outputDelta":
@@ -562,15 +623,20 @@ export class CodexEventHandler {
             case "turn/moderationMetadata":
             case "item/fileChange/outputDelta":
             case "item/fileChange/patchUpdated":
-            case "account/updated":
             case "fs/changed":
             case "mcpServer/startupStatus/updated":
+            case "mcpServer/event/stream/notification":
             case "serverRequest/resolved":
             case "model/verification":
+            case "modelProvider/authRecoveryStarted":
+            case "modelProvider/authRecoveryCompleted":
             case "model/safetyBuffering/updated":
             case "windows/worldWritableWarning":
             case "thread/realtime/started":
             case "thread/realtime/itemAdded":
+            case "thread/realtime/item/started":
+            case "thread/realtime/item/transcript/delta":
+            case "thread/realtime/item/completed":
             case "thread/realtime/transcript/delta":
             case "thread/realtime/transcript/done":
             case "thread/realtime/outputAudio/delta":
@@ -591,6 +657,7 @@ export class CodexEventHandler {
             case "externalAgentConfig/import/progress":
             case "process/outputDelta":
             case "process/exited":
+            case "autoApprovalReview/strictReviewRequired":
                 return null;
         }
     }
@@ -798,16 +865,16 @@ export class CodexEventHandler {
                 this.activeImageGenerationItems.add(event.item.id);
                 return createImageGenerationStartUpdate(event.item);
             case "collabAgentToolCall":
-                return createCollabAgentToolCallUpdate(event.item);
+                return this.subagents.legacyCollaborationStarted(event.item);
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
                 return null;
             case "contextCompaction":
                 return createContextCompactionStartUpdate(event.item);
             case "subAgentActivity":
-                this.activeSubAgentActivities.add(event.item.id);
-                return createSubAgentActivityUpdate(event.item, "in_progress", "tool_call");
+                return this.subagents.legacyActivityStarted(event.item);
             case "sleep":
+            case "functionCallOutput":
             case "userMessage":
             case "hookPrompt":
             case "reasoning":
@@ -858,7 +925,7 @@ export class CodexEventHandler {
             case "webSearch":
                 return createWebSearchCompleteUpdate(event.item);
             case "collabAgentToolCall":
-                return createCollabAgentToolCallCompleteUpdate(event.item);
+                return this.subagents.legacyCollaborationCompleted(event.item);
             case "agentMessage":
                 this.rememberAgentMessagePhase(event.item);
                 return null;
@@ -871,13 +938,10 @@ export class CodexEventHandler {
             case "contextCompaction":
                 return createContextCompactionCompleteUpdate(event.item);
             //ignored types
-            case "subAgentActivity": {
-                const sessionUpdate = this.activeSubAgentActivities.delete(event.item.id)
-                    ? "tool_call_update"
-                    : "tool_call";
-                return createSubAgentActivityUpdate(event.item, "completed", sessionUpdate);
-            }
+            case "subAgentActivity":
+                return this.subagents.legacyActivityCompleted(event.item);
             case "sleep":
+            case "functionCallOutput":
             case "userMessage":
             case "hookPrompt":
             case "enteredReviewMode":
@@ -1403,24 +1467,28 @@ export class CodexEventHandler {
         if (!this.sessionState.rateLimits) {
             this.sessionState.rateLimits = new Map();
         }
-        const fallbackLimitId = this.sessionState.rateLimits.size === 1
-            ? this.sessionState.rateLimits.keys().next().value
-            : null;
-        const limitId = rateLimits.limitId ?? rateLimits.limitName ?? fallbackLimitId ?? "unknown";
+        const fallbackLimitId = this.sessionState.rateLimits.has("codex")
+            ? "codex"
+            : this.sessionState.rateLimits.size === 1
+                ? this.sessionState.rateLimits.keys().next().value
+                : null;
+        const limitId = rateLimits.limitId ?? fallbackLimitId ?? rateLimits.limitName ?? "codex";
         const existing = this.sessionState.rateLimits.get(limitId)?.snapshot;
         const snapshot = sparse && existing
-            ? {
-                limitId: rateLimits.limitId ?? existing.limitId,
-                limitName: rateLimits.limitName ?? existing.limitName,
-                primary: rateLimits.primary ?? existing.primary,
-                secondary: rateLimits.secondary ?? existing.secondary,
-                credits: rateLimits.credits ?? existing.credits,
-                individualLimit: rateLimits.individualLimit ?? existing.individualLimit,
-                spendControlReached: rateLimits.spendControlReached ?? existing.spendControlReached,
-                planType: rateLimits.planType ?? existing.planType,
-                rateLimitReachedType: rateLimits.rateLimitReachedType ?? existing.rateLimitReachedType,
-            }
-            : rateLimits;
+            ? rateLimits.limitId === null
+                ? mergeRateLimitSnapshot(existing, {...rateLimits, limitId})
+                : {
+                    limitId: rateLimits.limitId ?? existing.limitId,
+                    limitName: rateLimits.limitName ?? existing.limitName,
+                    primary: rateLimits.primary ?? existing.primary,
+                    secondary: rateLimits.secondary ?? existing.secondary,
+                    credits: rateLimits.credits ?? existing.credits,
+                    individualLimit: rateLimits.individualLimit ?? existing.individualLimit,
+                    spendControlReached: rateLimits.spendControlReached ?? existing.spendControlReached,
+                    planType: rateLimits.planType ?? existing.planType,
+                    rateLimitReachedType: rateLimits.rateLimitReachedType ?? existing.rateLimitReachedType,
+                }
+            : {...rateLimits, limitId};
         this.sessionState.rateLimits.set(limitId, {
             limitId: limitId,
             limitName: snapshot.limitName ?? limitId,
@@ -1464,4 +1532,9 @@ export class CodexEventHandler {
         }
         return createGuardianApprovalReviewToolCall(params);
     }
+}
+
+function toolCallTitle(update: UpdateSessionEvent | null | undefined): string | undefined {
+    if (update?.sessionUpdate !== "tool_call") return undefined;
+    return update.title;
 }

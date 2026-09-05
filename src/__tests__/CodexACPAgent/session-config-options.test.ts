@@ -149,12 +149,12 @@ describe("Session config options", () => {
         const result = await codexAcpAgent.setSessionConfigOption({
             sessionId: "session-id",
             configId: MODE_CONFIG_ID,
-            value: AgentMode.ReadOnly.id,
+            value: AgentMode.Agent.id,
         });
 
-        expect(codexAcpAgent.getSessionState("session-id").agentMode).toBe(AgentMode.ReadOnly);
+        expect(codexAcpAgent.getSessionState("session-id").agentMode).toBe(AgentMode.Agent);
         const modeOption = result.configOptions?.find(o => o.id === MODE_CONFIG_ID);
-        expect((modeOption as any).currentValue).toBe(AgentMode.ReadOnly.id);
+        expect((modeOption as any).currentValue).toBe(AgentMode.Agent.id);
     });
 
     it("changes collaboration mode without starting a model turn", async () => {

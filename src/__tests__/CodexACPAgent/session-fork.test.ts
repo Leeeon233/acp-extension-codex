@@ -1,12 +1,9 @@
 import {describe, expect, it, vi} from "vitest";
 import type {McpServerStdio} from "@agentclientprotocol/sdk";
-import {
-    createCodexMockTestFixture,
-    createTestModel,
-} from "../acp-test-utils";
+import {createCodexMockTestFixture, createTestModel} from "../acp-test-utils";
 
 describe("ACP session fork", () => {
-    it("maps session/fork to thread/fork with lifecycle configuration", async () => {
+    it("maps the Lody turn fork point to thread/fork", async () => {
         const fixture = createCodexMockTestFixture();
         const codexAcpClient = fixture.getCodexAcpClient();
         const codexAppServerClient = fixture.getCodexAppServerClient();
@@ -28,11 +25,11 @@ describe("ACP session fork", () => {
             serviceTier: null,
             reasoningEffort: "medium",
         } as never);
+        const unsubscribeSpy = vi.spyOn(codexAppServerClient, "threadUnsubscribe").mockResolvedValue({} as never);
         vi.spyOn(codexAppServerClient, "listModels").mockResolvedValue({
             data: [model],
             nextCursor: null,
         });
-        const subscribed = vi.fn();
 
         const result = await codexAcpClient.forkSession({
             sessionId: "source-session-id",
@@ -47,7 +44,7 @@ describe("ACP session fork", () => {
                     },
                 },
             },
-        }, subscribed);
+        });
 
         expect(result).toEqual({
             sessionId: "child-session-id",
@@ -58,12 +55,10 @@ describe("ACP session fork", () => {
             currentServiceTier: null,
             additionalDirectories: ["/workspace/extra"],
         });
-        expect(subscribed).toHaveBeenCalledWith("child-session-id");
         expect(threadForkSpy).toHaveBeenCalledWith({
             threadId: "source-session-id",
             lastTurnId: "completed-turn-id",
             cwd: "/workspace",
-            excludeTurns: true,
             modelProvider: "openai",
             config: {
                 projects: {
@@ -82,82 +77,46 @@ describe("ACP session fork", () => {
                 },
             },
         });
+        expect(unsubscribeSpy).toHaveBeenCalledWith({threadId: "child-session-id"});
     });
 
-    it("installs the fork as an independent promptable ACP session", async () => {
+    it("creates and installs a forked session", async () => {
         const fixture = createCodexMockTestFixture();
-        const codexAcpAgent = fixture.getCodexAcpAgent();
-        const codexAcpClient = fixture.getCodexAcpClient();
-        const model = createTestModel();
+        const agent = fixture.getCodexAcpAgent();
+        const client = fixture.getCodexAcpClient();
+        const model = createTestModel({id: "gpt-5"});
 
-        vi.spyOn(codexAcpClient, "authRequired").mockResolvedValue(false);
-        vi.spyOn(codexAcpClient, "listSkills").mockResolvedValue({data: []});
-        const forkSessionSpy = vi.spyOn(codexAcpClient, "forkSession").mockImplementation(
-            async (_request, onSubscribed) => {
-                onSubscribed?.("child-session-id");
-                return {
-                    sessionId: "child-session-id",
-                    currentModelId: "model-id[medium]",
-                    models: [model],
-                    collaborationMode: "default",
-                    modelProvider: "custom-provider",
-                    currentServiceTier: null,
-                    additionalDirectories: ["/workspace/extra"],
-                };
-            },
-        );
+        vi.spyOn(client, "authRequired").mockResolvedValue(false);
+        vi.spyOn(client, "getAccount").mockResolvedValue({account: null, requiresOpenaiAuth: false});
+        vi.spyOn(client, "listSkills").mockResolvedValue({data: []});
+        const forkSpy = vi.spyOn(client, "forkSession").mockResolvedValue({
+            sessionId: "fork-id",
+            currentModelId: "gpt-5[medium]",
+            models: [model],
+            collaborationMode: "default",
+            modelProvider: "openai",
+            currentServiceTier: null,
+            additionalDirectories: [],
+        });
 
-        const response = await codexAcpAgent.unstable_forkSession({
-            sessionId: "source-session-id",
+        const response = await agent.forkSession({
+            sessionId: "source-id",
             cwd: "/workspace",
-            additionalDirectories: ["/workspace/extra"],
             mcpServers: [],
         });
 
-        expect(forkSessionSpy).toHaveBeenCalledWith(
+        expect(response.sessionId).toBe("fork-id");
+        expect(agent.getSessionState("fork-id").cwd).toBe("/workspace");
+        expect(fixture.getAcpConnectionEvents([])).toEqual([
             {
-                sessionId: "source-session-id",
-                cwd: "/workspace",
-                additionalDirectories: ["/workspace/extra"],
-                mcpServers: [],
+                method: "notify",
+                args: ["_auth/status_update", {authStatus: {kind: "none", label: "Not logged in"}}],
             },
-            expect.any(Function),
-        );
-        expect(response).toEqual(expect.objectContaining({
-            sessionId: "child-session-id",
-            modes: expect.objectContaining({currentModeId: "agent"}),
-            configOptions: expect.any(Array),
-        }));
-        expect(codexAcpAgent.getSessionState("child-session-id")).toEqual(expect.objectContaining({
-            sessionId: "child-session-id",
-            cwd: "/workspace",
-            additionalDirectories: ["/workspace/extra"],
-            currentTurnId: null,
-        }));
-    });
-
-    it("unsubscribes a child when fork setup fails after Codex creates it", async () => {
-        const fixture = createCodexMockTestFixture();
-        const codexAcpAgent = fixture.getCodexAcpAgent();
-        const codexAcpClient = fixture.getCodexAcpClient();
-
-        vi.spyOn(codexAcpClient, "authRequired").mockResolvedValue(false);
-        vi.spyOn(codexAcpClient, "forkSession").mockImplementation(
-            async (_request, onSubscribed) => {
-                onSubscribed?.("child-session-id");
-                throw new Error("model catalog unavailable");
-            },
-        );
-        const closeSessionSpy = vi.spyOn(codexAcpClient, "closeSession").mockResolvedValue();
-
-        await expect(codexAcpAgent.unstable_forkSession({
-            sessionId: "source-session-id",
+        ]);
+        expect(forkSpy).toHaveBeenCalledWith({
+            sessionId: "source-id",
             cwd: "/workspace",
             mcpServers: [],
-        })).rejects.toThrow("model catalog unavailable");
-
-        expect(closeSessionSpy).toHaveBeenCalledWith("child-session-id");
-        expect(() => codexAcpAgent.getSessionState("child-session-id"))
-            .toThrow("Session child-session-id not found");
+        });
     });
 });
