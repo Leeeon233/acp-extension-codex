@@ -924,6 +924,12 @@ export class CodexAcpClient {
         }
     }
 
+    onConnectionClosed(callback: () => void): () => void {
+        const close = this.codexClient.connection.onClose(callback);
+        const dispose = this.codexClient.connection.onDispose(callback);
+        return () => { close.dispose(); dispose.dispose(); };
+    }
+
     private enqueueSessionNotification(sessionId: string, operation: () => void | Promise<void>): void {
         const run = async () => {
             try {
