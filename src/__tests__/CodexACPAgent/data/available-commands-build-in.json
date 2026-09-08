@@ -13,9 +13,9 @@
             "_meta": {
               "commandAction": {
                 "kind": "setConfigOption",
-                "configId": "collaboration_mode",
-                "value": "plan",
-                "resetValue": "default",
+                "configId": "plan_mode",
+                "value": true,
+                "resetValue": false,
                 "presentation": "state"
               }
             }

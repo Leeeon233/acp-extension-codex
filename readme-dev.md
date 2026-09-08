@@ -84,3 +84,7 @@ npm run package:all
 1. Update the `@openai/codex` version in `package.json` (under `dependencies`).
 2. Regenerate Codex types in `src/app-server/`: `npm run generate-types`
 3. Ensure there are no type errors or failed tests: `npm run typecheck` and `npm run test`
+
+## Plan configuration
+
+Codex translates Core’s boolean `plan_mode` option to its native default/plan collaboration state. Approval and sandbox settings are retained. The `/plan` command uses the same boolean configuration path.
