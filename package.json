@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "An ACP-compatible coding agent powered by Codex",
   "main": "dist/index.js",
   "bin": {
@@ -73,7 +73,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
     "@openai/codex": "^0.153.4",
-    "acp-extension-core": "0.1.0",
+    "acp-extension-core": "0.1.1",
     "diff": "^9.0.0",
     "open": "^11.0.1",
     "vscode-jsonrpc": "^9.0.1",

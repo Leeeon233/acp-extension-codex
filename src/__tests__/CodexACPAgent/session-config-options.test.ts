@@ -8,7 +8,7 @@ import {
 import type {Model, ReasoningEffortOption} from "../../app-server/v2";
 import {LEGACY_SET_SESSION_MODEL_METHOD} from "../../AcpExtensions";
 import {
-    COLLABORATION_MODE_CONFIG_ID,
+    LODY_PLAN_MODE_CONFIG_ID,
     PLAN_COLLABORATION_MODE,
 } from "../../CollaborationModeConfig";
 
@@ -61,7 +61,7 @@ describe("Session config options", () => {
         const {response} = await createSession("fast-model[medium]", [fast, slow]);
 
         const ids = response.configOptions?.map(o => o.id);
-        expect(ids).toEqual([MODE_CONFIG_ID, COLLABORATION_MODE_CONFIG_ID, MODEL_CONFIG_ID, REASONING_EFFORT_CONFIG_ID, "fast-mode"]);
+        expect(ids).toEqual([MODE_CONFIG_ID, LODY_PLAN_MODE_CONFIG_ID, MODEL_CONFIG_ID, REASONING_EFFORT_CONFIG_ID, "fast-mode"]);
 
         const modelOption = response.configOptions?.find(o => o.id === MODEL_CONFIG_ID);
         expect(modelOption).toMatchObject({
@@ -103,7 +103,7 @@ describe("Session config options", () => {
         const {codexAcpAgent, response} = await createSession("custom-model[high]", [fast, slow]);
 
         const ids = response.configOptions?.map(o => o.id);
-        expect(ids).toEqual([MODE_CONFIG_ID, COLLABORATION_MODE_CONFIG_ID, MODEL_CONFIG_ID]);
+        expect(ids).toEqual([MODE_CONFIG_ID, LODY_PLAN_MODE_CONFIG_ID, MODEL_CONFIG_ID]);
 
         const modelOption = response.configOptions?.find(o => o.id === MODEL_CONFIG_ID);
         expect(modelOption).toMatchObject({
@@ -164,8 +164,8 @@ describe("Session config options", () => {
 
         const result = await codexAcpAgent.setSessionConfigOption({
             sessionId: "session-id",
-            configId: COLLABORATION_MODE_CONFIG_ID,
-            value: PLAN_COLLABORATION_MODE,
+            configId: LODY_PLAN_MODE_CONFIG_ID,
+            type: "boolean", value: true,
         });
 
         expect(update).toHaveBeenCalledWith(expect.objectContaining({
@@ -173,7 +173,7 @@ describe("Session config options", () => {
             collaborationMode: expect.objectContaining({mode: "plan"}),
         }));
         expect(codexAcpAgent.getSessionState("session-id").collaborationMode).toBe("plan");
-        expect(result.configOptions?.find(o => o.id === COLLABORATION_MODE_CONFIG_ID)).toMatchObject({currentValue: "plan"});
+        expect(result.configOptions?.find(o => o.id === LODY_PLAN_MODE_CONFIG_ID)).toMatchObject({currentValue: true});
     });
 
     it("toggles collaboration mode with /plan without starting a model turn", async () => {
@@ -213,7 +213,7 @@ describe("Session config options", () => {
                 update: expect.objectContaining({
                     sessionUpdate: "config_option_update",
                     configOptions: expect.arrayContaining([
-                        expect.objectContaining({id: COLLABORATION_MODE_CONFIG_ID, currentValue: "plan"}),
+                        expect.objectContaining({id: LODY_PLAN_MODE_CONFIG_ID, currentValue: true}),
                     ]),
                 }),
             })],
@@ -224,7 +224,7 @@ describe("Session config options", () => {
                 update: expect.objectContaining({
                     sessionUpdate: "config_option_update",
                     configOptions: expect.arrayContaining([
-                        expect.objectContaining({id: COLLABORATION_MODE_CONFIG_ID, currentValue: "default"}),
+                        expect.objectContaining({id: LODY_PLAN_MODE_CONFIG_ID, currentValue: false}),
                     ]),
                 }),
             })],

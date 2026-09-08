@@ -15,8 +15,7 @@ import type {TokenCount} from "./TokenCount";
 import {logger} from "./Logger";
 import {createAgentTextMessageChunk} from "./ContentChunks";
 import {
-    COLLABORATION_MODE_CONFIG_ID,
-    DEFAULT_COLLABORATION_MODE,
+    LODY_PLAN_MODE_CONFIG_ID,
     PLAN_COLLABORATION_MODE,
 } from "./CollaborationModeConfig";
 
@@ -55,7 +54,7 @@ export function resolveGoalCommandHandleResult(
 export type CommandHandleOptions = {
     onTurnStartPending?: () => void;
     onTurnStarted?: (turnId: string, threadId: string) => void;
-    setConfigOption?: (configId: string, value: string) => Promise<void>;
+    setConfigOption?: (configId: string, value: string | boolean) => Promise<void>;
 };
 
 export type LogoutHandler = () => void | Promise<void>;
@@ -156,9 +155,9 @@ export class CodexCommands {
                 _meta: {
                     commandAction: {
                         kind: "setConfigOption",
-                        configId: COLLABORATION_MODE_CONFIG_ID,
-                        value: PLAN_COLLABORATION_MODE,
-                        resetValue: DEFAULT_COLLABORATION_MODE,
+                        configId: LODY_PLAN_MODE_CONFIG_ID,
+                        value: true,
+                        resetValue: false,
                         presentation: "state",
                     },
                 },
@@ -258,10 +257,8 @@ export class CodexCommands {
                     await this.sendCommandUsageMessage(commandName, "no arguments", sessionId);
                     return { handled: true };
                 }
-                const mode = sessionState.collaborationMode === PLAN_COLLABORATION_MODE
-                    ? DEFAULT_COLLABORATION_MODE
-                    : PLAN_COLLABORATION_MODE;
-                await options.setConfigOption?.(COLLABORATION_MODE_CONFIG_ID, mode);
+                const mode = sessionState.collaborationMode !== PLAN_COLLABORATION_MODE;
+                await options.setConfigOption?.(LODY_PLAN_MODE_CONFIG_ID, mode);
                 return { handled: options.setConfigOption !== undefined };
             }
             case "compact": {

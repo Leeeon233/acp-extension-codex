@@ -772,8 +772,8 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
         expect(codexAcpAgent.getSessionState("resume-id").collaborationMode).toBe("plan");
         expect(codexAcpAgent.getSessionState("load-id").collaborationMode).toBe("plan");
-        expect(resumed.configOptions?.find(option => option.id === "collaboration_mode")).toMatchObject({currentValue: "plan"});
-        expect(loaded.configOptions?.find(option => option.id === "collaboration_mode")).toMatchObject({currentValue: "plan"});
+        expect(resumed.configOptions?.find(option => option.id === "plan_mode")).toMatchObject({currentValue: true});
+        expect(loaded.configOptions?.find(option => option.id === "plan_mode")).toMatchObject({currentValue: true});
     });
 
     it('uses configured model provider when resuming sessions without an explicit provider', async () => {

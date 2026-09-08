@@ -39,7 +39,7 @@ import type {RateLimitsMap} from "./RateLimitsMap";
 import {ModelId} from "./ModelId";
 import {AgentMode, MODE_CONFIG_ID} from "./AgentMode";
 import {
-    COLLABORATION_MODE_CONFIG_ID,
+    LODY_PLAN_MODE_CONFIG_ID,
     createCollaborationModeConfigOption,
     DEFAULT_COLLABORATION_MODE,
     parseCollaborationMode,
@@ -1492,7 +1492,7 @@ export class CodexAcpServer {
         };
     }
 
-    private async applySessionConfigOption(sessionState: SessionState, params: acp.SetSessionConfigOptionRequest): Promise<void> {
+    private async applySessionConfigOption(sessionState: SessionState, params: Omit<acp.SetSessionConfigOptionRequest, "value"> & { value: string | boolean }): Promise<void> {
         switch (params.configId) {
             case FAST_MODE_CONFIG_ID:
                 this.applyFastModeChange(sessionState, params);
@@ -1500,8 +1500,9 @@ export class CodexAcpServer {
             case MODE_CONFIG_ID:
                 this.applyModeChange(sessionState, this.stringConfigValue(params));
                 break;
-            case COLLABORATION_MODE_CONFIG_ID:
-                await this.applyCollaborationModeChange(sessionState, this.stringConfigValue(params));
+            case LODY_PLAN_MODE_CONFIG_ID:
+                if (typeof params.value !== "boolean") throw RequestError.invalidParams();
+                await this.applyCollaborationModeChange(sessionState, params.value ? PLAN_COLLABORATION_MODE : DEFAULT_COLLABORATION_MODE);
                 break;
             case MODEL_CONFIG_ID:
                 this.applyModelChange(sessionState, this.stringConfigValue(params));
@@ -1514,7 +1515,7 @@ export class CodexAcpServer {
         }
     }
 
-    private applyFastModeChange(sessionState: SessionState, params: acp.SetSessionConfigOptionRequest): void {
+    private applyFastModeChange(sessionState: SessionState, params: Omit<acp.SetSessionConfigOptionRequest, "value"> & { value: string | boolean }): void {
         const value = params.value;
         if (typeof value === "boolean") {
             sessionState.fastModeEnabled = value;
@@ -1526,7 +1527,7 @@ export class CodexAcpServer {
         sessionState.fastModeEnabled = value === FAST_MODE_ON;
     }
 
-    private stringConfigValue(params: acp.SetSessionConfigOptionRequest): string {
+    private stringConfigValue(params: { value: string | boolean }): string {
         if (typeof params.value !== "string") {
             throw RequestError.invalidParams();
         }
@@ -3123,7 +3124,7 @@ export class CodexAcpServer {
                     await this.applySessionConfigOption(sessionState, {
                         sessionId: sessionState.sessionId,
                         configId,
-                        value,
+                        ...(typeof value === "boolean" ? { type: "boolean" as const, value } : { value }),
                     });
                     const session = new ACPSessionConnection(this.connection, sessionState.sessionId);
                     await session.update({
