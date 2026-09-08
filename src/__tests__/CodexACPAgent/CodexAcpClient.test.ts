@@ -1904,6 +1904,13 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         await expect(mockFixture.getCodexAcpAgent().cancel({ sessionId: "session-id" })).resolves.toBeUndefined();
         await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
 
+        // Cancellation must release the ACP prompt even while Codex is still
+        // compacting, otherwise the next prompt is rejected as already active.
+        await expect(mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "/status" }],
+        })).resolves.toMatchObject({ stopReason: "end_turn" });
+
         // The provider may still emit its terminal notification after the prompt
         // has been cancelled; it must be harmless and must not resurrect the prompt.
         mockFixture.sendServerNotification({
