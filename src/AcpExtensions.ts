@@ -41,9 +41,11 @@ export {
     GOAL_CONTROL_ACTIONS,
     GOAL_CONTROL_METHOD,
     GOAL_EXTENSION_VERSION,
+    parseGoalPromptControl,
     type GoalCapability,
     type GoalControlAction,
     type GoalControlRequest,
+    type GoalPromptControl,
     type GoalSnapshot,
     type GoalStatus,
 } from "./GoalExtension";
@@ -68,7 +70,14 @@ export const CODEX_LODY_CAPABILITIES = {
     },
     tasks: {version: 1, background: true},
     subagents: {version: 1, lifecycle: true},
-    goal: {version: 1, actions: ["set", "pause", "resume", "clear"]},
+    goal: {
+        version: 1,
+        actions: ["set", "pause", "resume", "clear"],
+        // Status-only actions are safe mid-prompt; anything that starts work
+        // needs the client's prompt to own the turns it produces.
+        controlActions: ["pause", "clear"],
+        promptActions: ["set", "pause", "resume", "clear"],
+    },
     compaction: {version: 1},
     sessionHistory: {version: 1},
 } as const satisfies LodyExtensionCapabilities;

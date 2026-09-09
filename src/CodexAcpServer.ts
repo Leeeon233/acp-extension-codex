@@ -55,7 +55,7 @@ import {
 } from "./ModelConfigOption";
 import type {TokenCount} from "./TokenCount";
 import {toPromptUsage} from "./TokenCount";
-import {CodexCommands, GOAL_CONTINUATION_PROMPT} from "./CodexCommands";
+import {CodexCommands, GOAL_CONTINUATION_PROMPT, type CommandHandleOptions} from "./CodexCommands";
 import {GoalPromptLifecycle} from "./GoalPromptLifecycle";
 import {SteeringQueue} from "./SteeringQueue";
 import type {QuotaMeta} from "./QuotaMeta";
@@ -72,6 +72,7 @@ import {
     type AuthStatus,
     GOAL_CONTROL_METHOD,
     isExtMethodRequest,
+    parseGoalPromptControl,
     LEGACY_SET_SESSION_MODEL_METHOD,
     type LegacyLoadSessionResponse,
     type LegacyNewSessionResponse,
@@ -3017,6 +3018,7 @@ export class CodexAcpServer {
         const agentFileChangeReportRequest = clientSupportsAgentFileChangeReports(this.clientCapabilities)
             ? parseAgentFileChangeReportRequest(params._meta)
             : null;
+        const goalPromptControl = parseGoalPromptControl(params._meta);
         let agentFileChangeReportTurnId: string | null = null;
         let agentFileChangeReportUnavailableReason: AgentFileChangeReportUnavailableReason = "providerError";
         let promptWasCancelled = false;
@@ -3132,7 +3134,7 @@ export class CodexAcpServer {
                 return cancelledPromptResponse();
             }
 
-            const commandPromise = this.availableCommands.tryHandleCommand(params.prompt, sessionState, {
+            const commandOptions: CommandHandleOptions = {
                 onTurnStartPending: () => {
                     sessionState.lastTokenUsage = null;
                     ensurePendingTurnStart();
@@ -3161,7 +3163,12 @@ export class CodexAcpServer {
                         configOptions: this.createSessionConfigOptions(sessionState),
                     });
                 },
-            });
+            };
+            // A goal action carried by prompt metadata is the same operation as
+            // its slash command, minus the command text in the transcript.
+            const commandPromise = goalPromptControl === null
+                ? this.availableCommands.tryHandleCommand(params.prompt, sessionState, commandOptions)
+                : this.availableCommands.runGoalPromptControl(sessionState, goalPromptControl, commandOptions);
             void commandPromise.catch((err) => {
                 if (this.activePrompts.get(params.sessionId) !== activePrompt) {
                     logger.error(`Command for cancelled prompt ${params.sessionId} failed after prompt returned`, err);
