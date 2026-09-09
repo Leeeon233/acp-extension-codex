@@ -3752,10 +3752,10 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 durationMs: null,
             }
         });
-        vi.spyOn(mockFixture.getCodexAppServerClient(), "awaitTurnCompleted").mockResolvedValue({
-            threadId: sessionState.sessionId,
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "awaitTurnCompleted").mockImplementation(async (threadId, turnId) => ({
+            threadId,
             turn: {
-                id: "turn-id",
+                id: turnId,
                 items: [],
                 itemsView: "notLoaded",
                 status: "completed",
@@ -3764,7 +3764,7 @@ describe('ACP server test', { timeout: 40_000 }, () => {
                 completedAt: null,
                 durationMs: null,
             }
-        });
+        }));
         vi.spyOn(mockFixture.getCodexAcpAgent(), "getSessionState").mockReturnValue(sessionState);
         return { mockFixture, sessionState, turnStartSpy };
     }
