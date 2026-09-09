@@ -24,23 +24,13 @@ export function readWorktreeProject(meta: unknown): LodyWorktreeProject | undefi
 
 /** Uses project APIs only: logical roots must never become execution or sandbox roots. */
 export class WorktreeProjects {
-    private readonly pending = new Map<string, Promise<string>>();
-
     constructor(private readonly client: CodexAppServerClient) {}
 
     async resolve(project: LodyWorktreeProject | undefined): Promise<string | undefined> {
         if (!project) return undefined;
         const originProjectPath = await realpath(project.originProjectPath);
         const key = projectRootKey(originProjectPath);
-        const existing = this.pending.get(key);
-        if (existing) return existing;
-        const pending = this.findOrCreate(originProjectPath, key);
-        this.pending.set(key, pending);
-        try {
-            return await pending;
-        } finally {
-            this.pending.delete(key);
-        }
+        return this.findOrCreate(originProjectPath, key);
     }
 
     async assign(thread: Thread, project: LodyWorktreeProject | undefined, preserveExisting: boolean): Promise<void> {
@@ -48,7 +38,6 @@ export class WorktreeProjects {
         const projectId = await this.resolve(project);
         if (projectId && projectId !== thread.projectId) {
             await this.client.threadProjectUpdate({threadId: thread.id, projectId});
-            thread.projectId = projectId;
         }
     }
 
