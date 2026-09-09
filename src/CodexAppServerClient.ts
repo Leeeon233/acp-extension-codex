@@ -172,7 +172,7 @@ export class CodexAppServerClient {
         resolve: (event: TurnCompletedNotification) => void;
         reject: (error: Error) => void;
     }>>();
-    private readonly pendingCompactionCompletionResolvers = new Map<string, Set<(event: CompactionCompletedNotification) => void>>();
+    private readonly pendingCompactionCompletionResolvers = new Map<string, Set<CompactionCompletionWaiter>>();
     private readonly turnCompletionCaptures = new Map<string, Set<(event: TurnCompletedNotification) => void>>();
     private readonly turnRoutingCaptures = new Map<string, Set<(turnId: string) => void>>();
     private readonly threadStatusCaptures = new Map<string, Set<(status: ThreadStatus) => void>>();
@@ -180,17 +180,21 @@ export class CodexAppServerClient {
     private readonly threadGoalClearedCaptures = new Map<string, Set<() => void>>();
     private readonly threadSettings = new Map<string, ThreadSettings>();
     private readonly staleTurnIds = new Map<string, Set<string>>();
+    // Connection-level: JSON-RPC is gone, so neither turn/completed nor
+    // thread/compacted can arrive. Shared by turn and compaction waiters.
     private turnCompletionTerminalError: Error | null = null;
 
     constructor(connection: MessageConnection) {
         this.connection = connection;
         // Process exit disposes the connection (see CodexJsonRpcConnection);
         // fail waiters that only a now-impossible notification could settle.
-        const failPendingTurns = () => this.rejectAllPendingTurnCompletions(
-            new Error("Codex process exited before completing the turn"),
-        );
-        this.connection.onClose(failPendingTurns);
-        this.connection.onDispose(failPendingTurns);
+        const failPendingNotificationWaiters = () => {
+            const error = new Error("Codex process exited before completing the turn");
+            this.rejectAllPendingTurnCompletions(error);
+            this.rejectAllPendingCompactionCompletions(error);
+        };
+        this.connection.onClose(failPendingNotificationWaiters);
+        this.connection.onDispose(failPendingNotificationWaiters);
         this.connection.onUnhandledNotification((data) => {
             const serverNotification = data as ServerNotification;
             if (isMcpServerStatusUpdatedNotification(serverNotification)) {
@@ -544,9 +548,16 @@ export class CodexAppServerClient {
     }
 
     async runCompact(params: ThreadCompactStartParams): Promise<CompactionCompletedNotification> {
-        const compactionCompleted = this.awaitCompactionCompleted(params.threadId);
-        await this.threadCompactStart(params);
-        return await compactionCompleted;
+        const waiter = this.createCompactionWaiter(params.threadId);
+        try {
+            const [, completed] = await Promise.all([
+                this.threadCompactStart(params),
+                waiter.promise,
+            ]);
+            return completed;
+        } finally {
+            waiter.dispose();
+        }
     }
 
     async turnInterrupt(params: TurnInterruptParams): Promise<TurnInterruptResponse> {
@@ -734,11 +745,42 @@ export class CodexAppServerClient {
     }
 
     async awaitCompactionCompleted(threadId: string): Promise<CompactionCompletedNotification> {
-        return await new Promise((resolve) => {
+        return await this.createCompactionWaiter(threadId).promise;
+    }
+
+    private createCompactionWaiter(threadId: string): {
+        promise: Promise<CompactionCompletedNotification>;
+        dispose: () => void;
+    } {
+        if (this.turnCompletionTerminalError) {
+            const promise = Promise.reject(this.turnCompletionTerminalError);
+            void promise.catch(() => {});
+            return {promise, dispose: () => {}};
+        }
+
+        let entry: CompactionCompletionWaiter | undefined;
+        const promise = new Promise<CompactionCompletedNotification>((resolve, reject) => {
+            entry = {resolve, reject};
             const resolvers = this.pendingCompactionCompletionResolvers.get(threadId) ?? new Set();
-            resolvers.add(resolve);
+            resolvers.add(entry);
             this.pendingCompactionCompletionResolvers.set(threadId, resolvers);
         });
+        return {
+            promise,
+            dispose: () => {
+                if (entry === undefined) {
+                    return;
+                }
+                const resolvers = this.pendingCompactionCompletionResolvers.get(threadId);
+                if (!resolvers) {
+                    return;
+                }
+                resolvers.delete(entry);
+                if (resolvers.size === 0) {
+                    this.pendingCompactionCompletionResolvers.delete(threadId);
+                }
+            },
+        };
     }
 
     resolveTurnInterrupted(threadId: string, turnId: string): void {
@@ -828,8 +870,8 @@ export class CodexAppServerClient {
             return;
         }
         this.pendingCompactionCompletionResolvers.delete(threadId);
-        for (const resolve of resolvers) {
-            resolve(event);
+        for (const entry of resolvers) {
+            entry.resolve(event);
         }
     }
 
@@ -938,6 +980,17 @@ export class CodexAppServerClient {
         this.pendingTurnCompletionResolvers.clear();
         for (const threadResolvers of threads) {
             for (const entry of threadResolvers.values()) {
+                entry.reject(error);
+            }
+        }
+    }
+
+    private rejectAllPendingCompactionCompletions(error: Error): void {
+        this.turnCompletionTerminalError ??= error;
+        const threads = [...this.pendingCompactionCompletionResolvers.values()];
+        this.pendingCompactionCompletionResolvers.clear();
+        for (const resolvers of threads) {
+            for (const entry of resolvers) {
                 entry.reject(error);
             }
         }
@@ -1096,6 +1149,11 @@ export type CodexConnectionEvent =
     | ({ eventType: "request" } & CodexRequest)
     | ({ eventType: "response" } & unknown)
     | ({ eventType: "notification" } & ServerNotification);
+
+type CompactionCompletionWaiter = {
+    resolve: (event: CompactionCompletedNotification) => void;
+    reject: (error: Error) => void;
+};
 
 export type CompactionCompletedNotification =
     | { method: "thread/compacted", params: Extract<ServerNotification, { method: "thread/compacted" }>["params"] }
