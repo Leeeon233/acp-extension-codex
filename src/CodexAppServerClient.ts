@@ -1,3 +1,7 @@
+import type {
+    CodexProjectRequest, ProjectListParams, ProjectListResponse,
+    ProjectCreateParams, ProjectCreateResponse, ThreadProjectUpdateParams,
+} from "./ProjectApi";
 import {type MessageConnection, RequestType} from "vscode-jsonrpc/node";
 import type {
     ClientRequest,
@@ -563,7 +567,19 @@ export class CodexAppServerClient {
         this.staleTurnIds.set(threadId, threadStaleTurns);
     }
 
-    async threadStart(params: ThreadStartParams): Promise<ThreadStartResponse> {
+    async projectList(params: ProjectListParams): Promise<ProjectListResponse> {
+        return await this.sendRequest({method: "project/list", params});
+    }
+
+    async projectCreate(params: ProjectCreateParams): Promise<ProjectCreateResponse> {
+        return await this.sendRequest({method: "project/create", params});
+    }
+
+    async threadProjectUpdate(params: ThreadProjectUpdateParams): Promise<void> {
+        await this.sendRequest({method: "thread/metadata/update", params});
+    }
+
+    async threadStart(params: ThreadStartParams & {projectId?: string}): Promise<ThreadStartResponse> {
         return await this.sendRequest({ method: "thread/start", params: params });
     }
 
@@ -1085,7 +1101,7 @@ export type CompactionCompletedNotification =
     | { method: "thread/compacted", params: Extract<ServerNotification, { method: "thread/compacted" }>["params"] }
     | { method: "item/completed", params: ItemCompletedNotification & { item: Extract<ItemCompletedNotification["item"], { type: "contextCompaction" }> } };
 
-type CodexRequest = DistributiveOmit<ClientRequest, "id"> | ThreadBackgroundTerminalsRequest
+type CodexRequest = DistributiveOmit<ClientRequest, "id"> | ThreadBackgroundTerminalsRequest | CodexProjectRequest
 
 type DistributiveOmit<T, K extends keyof any> = T extends any
     ? Omit<T, K>
