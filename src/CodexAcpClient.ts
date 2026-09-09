@@ -1,3 +1,4 @@
+import {readWorktreeProject, WorktreeProjects} from "./WorktreeProject";
 import {
     type ApiKeyAuthRequest,
     CODEX_API_KEY_ENV_VAR,
@@ -127,12 +128,14 @@ export class CodexAcpClient {
     private pendingAccountUpdated: Promise<AccountUpdatedNotification> | null = null;
     private readonly sessionNotificationQueues = new Map<string, Promise<void>>();
     private readonly subagents: CodexSubagentSubscriptions;
+    private readonly worktreeProjects: WorktreeProjects;
     private skillExtraRoots: string[] = [];
     private configPath: string | null = null;
 
 
     constructor(codexClient: CodexAppServerClient, codexConfig?: JsonObject, modelProvider?: string) {
         this.codexClient = codexClient;
+        this.worktreeProjects = new WorktreeProjects(codexClient);
         this.config = codexConfig ?? {};
         this.modelProvider = modelProvider ?? null;
         this.gatewayConfig = null;
@@ -542,6 +545,7 @@ export class CodexAcpClient {
         request: acp.ResumeSessionRequest,
         onSubscribed?: (sessionId?: string) => void,
     ): Promise<SessionMetadata> {
+        const project = readWorktreeProject(request._meta);
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
         await this.refreshSkills(request.cwd, additionalDirectories);
 
@@ -552,6 +556,7 @@ export class CodexAcpClient {
             threadId: request.sessionId,
         });
         onSubscribed?.(request.sessionId);
+        await this.worktreeProjects.assign(response.thread, project, true);
         const codexModels = await this.fetchAvailableModels();
         const currentModelId = this.createModelId(codexModels, response.model, response.reasoningEffort).toString();
         return {
@@ -569,6 +574,7 @@ export class CodexAcpClient {
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
         return await runForkSession(request, additionalDirectories, {
             codexClient: this.codexClient,
+            assignProject: (thread, project) => this.worktreeProjects.assign(thread, project, false),
             refreshSkills: (cwd, directories) => this.refreshSkills(cwd, directories),
             createSessionConfig: (cwd, directories, mcpServers) =>
                 this.createSessionConfig(cwd, directories, mcpServers),
@@ -581,6 +587,7 @@ export class CodexAcpClient {
     }
 
     async loadSession(request: acp.LoadSessionRequest, onSubscribed?: () => void): Promise<SessionMetadataWithThread> {
+        const project = readWorktreeProject(request._meta);
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
         await this.refreshSkills(request.cwd, additionalDirectories);
 
@@ -591,6 +598,7 @@ export class CodexAcpClient {
             threadId: request.sessionId,
         });
         onSubscribed?.();
+        await this.worktreeProjects.assign(response.thread, project, true);
         const historyResponse = await this.codexClient.threadRead({
             threadId: response.thread.id,
             includeTurns: true,
@@ -617,10 +625,13 @@ export class CodexAcpClient {
         request: acp.NewSessionRequest,
         onSubscribed?: (sessionId?: string) => void,
     ): Promise<SessionMetadata> {
+        const project = readWorktreeProject(request._meta);
         const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
         await this.refreshSkills(request.cwd, additionalDirectories);
 
+        const projectId = await this.worktreeProjects.resolve(project);
         const response = await this.codexClient.threadStart({
+            ...(projectId ? {projectId} : {}),
             config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
             modelProvider: this.getModelProvider(),
             cwd: request.cwd,
@@ -922,6 +933,12 @@ export class CodexAcpClient {
             if (!queue) return;
             await queue;
         }
+    }
+
+    onConnectionClosed(callback: () => void): () => void {
+        const close = this.codexClient.connection.onClose(callback);
+        const dispose = this.codexClient.connection.onDispose(callback);
+        return () => { close.dispose(); dispose.dispose(); };
     }
 
     private enqueueSessionNotification(sessionId: string, operation: () => void | Promise<void>): void {

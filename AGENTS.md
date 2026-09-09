@@ -33,6 +33,12 @@
 
 ## Docs
 
+- ACP v1 prompt completion follows native Goal continuations across turn boundaries. Keep
+  the prompt and interaction handlers open until the goal stops and its last native turn
+  drains, or the turn fails/is cancelled. Never issue another `turn/start` after a routed
+  `/goal` turn; Codex owns continuation. Cancellation also pauses the goal before returning.
+- A persistent active goal does not create a prompt or live presence by itself. Goal metadata
+  remains a separate Core snapshot; do not add a private execution lifecycle protocol.
 - Codex app-server usage: see https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md when touching protocol/transport details, adding or consuming JSON-RPC methods, handling approvals/turn events, or updating generated schema/clients.
 - App-server events: prefer `thread/*`, `turn/*`, and `item/*` event surfaces; avoid the deprecated `codex/event/*` API (planned removal). Keep implementations aligned with generated types in `src/app-server` (including `v2` exports).
 - Steer uses app-server `turn/steer` on the tracked active turn. Correlate `clientUserMessageId` and acknowledge only the matching `item/completed(userMessage)`; never emulate steer with a second `turn/start`.
@@ -58,3 +64,7 @@
   session opens, merge sparse `account/rateLimits/updated` values into that snapshot, and preserve
   each native window's `windowDurationMins` when mapping it to Core's
   `windowDurationSeconds`. Never infer 5-hour/7-day meaning from `primary`/`secondary` position.
+- Core `worktreeProject` maps to native project APIs, never trust configuration or
+  writable roots. Preserve existing project assignments on load/resume; assign only
+  the child on fork. Project protocol fields omitted by stable generation live in
+  `ProjectApi.ts`, based on the pinned runtime's experimental schema.
