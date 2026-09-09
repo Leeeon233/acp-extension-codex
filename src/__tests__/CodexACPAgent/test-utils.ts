@@ -19,8 +19,8 @@ export function createMockConnections(): MockConnections {
 
     const mockCodexConnection = {
         sendRequest: vi.fn(),
-        onClose: vi.fn(),
-        onDispose: vi.fn(),
+        onClose: vi.fn(() => ({dispose: () => {}})),
+        onDispose: vi.fn(() => ({dispose: () => {}})),
         onUnhandledNotification: vi.fn((handler: Function) => {
             unhandledNotificationHandler = handler;
         }),

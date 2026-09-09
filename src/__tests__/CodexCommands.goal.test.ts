@@ -17,10 +17,11 @@ const completedTurn = (status: TurnCompletedNotification["turn"]["status"]): Tur
 });
 
 describe("resolveGoalCommandHandleResult", () => {
-    it("chains into goal continuation when Codex completes a setup turn", () => {
-        expect(resolveGoalCommandHandleResult(completedTurn("completed"))).toEqual({
-            handled: false,
-            prompt: GOAL_CONTINUATION_PROMPT,
+    it("follows native continuation when Codex completes a setup turn", () => {
+        const turnCompleted = completedTurn("completed");
+        expect(resolveGoalCommandHandleResult(turnCompleted)).toEqual({
+            handled: true,
+            turnCompleted,
         });
     });
 

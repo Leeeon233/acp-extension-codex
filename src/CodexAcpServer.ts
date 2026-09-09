@@ -56,6 +56,7 @@ import {
 import type {TokenCount} from "./TokenCount";
 import {toPromptUsage} from "./TokenCount";
 import {CodexCommands, GOAL_CONTINUATION_PROMPT} from "./CodexCommands";
+import {GoalPromptLifecycle} from "./GoalPromptLifecycle";
 import {SteeringQueue} from "./SteeringQueue";
 import type {QuotaMeta} from "./QuotaMeta";
 import {logger} from "./Logger";
@@ -259,6 +260,7 @@ interface ActivePrompt {
     cancelSignal: Promise<null>;
     signal: AbortSignal;
     currentTurn: { threadId: string, turnId: string } | null;
+    hasCompletedTurn: boolean;
     requestCancel: () => void;
     requestClose: () => void;
     complete: () => void;
@@ -2771,6 +2773,7 @@ export class CodexAcpServer {
             cancelSignal,
             signal: abortController.signal,
             currentTurn: null,
+            hasCompletedTurn: false,
             requestCancel: () => {
                 if (abortController.signal.aborted) {
                     return;
@@ -3020,6 +3023,12 @@ export class CodexAcpServer {
         let recoverableSessionFailure = sessionState.sessionFailure;
         sessionState.currentTurnId = null;
         const activePrompt = this.trackActivePrompt(params.sessionId);
+        const goalLifecycle = new GoalPromptLifecycle(params.sessionId, sessionState.currentGoal?.status === "active");
+        const cancelGoalLifecycle = () => goalLifecycle.cancel();
+        activePrompt.signal.addEventListener("abort", cancelGoalLifecycle);
+        const disposeGoalConnection = this.codexAcpClient.onConnectionClosed(() => {
+            goalLifecycle.fail(new Error("Codex connection closed during goal continuation"));
+        });
         let pendingTurnStart: PendingTurnStart | null = null;
         const ensurePendingTurnStart = (): PendingTurnStart => {
             if (pendingTurnStart === null) {
@@ -3078,6 +3087,25 @@ export class CodexAcpServer {
             };
             await this.codexAcpClient.subscribeToSessionEvents(params.sessionId,
                 async (event) => {
+                    if (this.activePrompts.get(params.sessionId) === activePrompt) {
+                        goalLifecycle.observe(event);
+                        if (event.method === "turn/started" && event.params.threadId === params.sessionId) {
+                            const turn = {threadId: params.sessionId, turnId: event.params.turn.id};
+                            activePrompt.currentTurn = turn;
+                            if (this.promptShouldStop(params.sessionId, activePrompt)) {
+                                this.interruptLateStartedTurn(turn);
+                                return;
+                            }
+                            recoverableSessionFailure = sessionState.sessionFailure;
+                            promptNotificationsActive = true;
+                        }
+                        if (event.method === "turn/completed" &&
+                            event.params.threadId === params.sessionId &&
+                            activePrompt.currentTurn?.turnId === event.params.turn.id) {
+                            activePrompt.currentTurn = null;
+                            activePrompt.hasCompletedTurn = true;
+                        }
+                    }
                     await this.handleSteerAppliedNotification(params.sessionId, event, activePrompt);
                     await observeInteraction(event);
                     if (!promptNotificationsActive) {
@@ -3111,6 +3139,7 @@ export class CodexAcpServer {
                 },
                 onTurnStarted: (turnId, threadId) => {
                     const turn = {threadId, turnId};
+                    if (threadId === params.sessionId) goalLifecycle.startTurn(turnId);
                     activePrompt.currentTurn = turn;
                     if (this.promptShouldStop(params.sessionId, activePrompt)) {
                         this.interruptLateStartedTurn(turn);
@@ -3138,7 +3167,7 @@ export class CodexAcpServer {
                     logger.error(`Command for cancelled prompt ${params.sessionId} failed after prompt returned`, err);
                 }
             });
-            const commandResult = await Promise.race([
+            let commandResult = await Promise.race([
                 commandPromise,
                 activePrompt.closeSignal,
                 this.cancelBeforeTurnStarted(activePrompt),
@@ -3147,6 +3176,15 @@ export class CodexAcpServer {
                 return cancelledPromptResponse();
             }
             if (commandResult.handled) {
+                if (commandResult.turnCompleted) {
+                    await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
+                    const firstCommandTurn = commandResult.turnCompleted;
+                    const completed = await this.runWithProcessCheck(() => Promise.race([
+                        goalLifecycle.waitForCompletion(firstCommandTurn), activePrompt.closeSignal,
+                    ]));
+                    if (completed === null) return cancelledPromptResponse();
+                    commandResult = {...commandResult, turnCompleted: completed};
+                }
                 promptNotificationsActive = false;
                 logger.log("Prompt handled by a command");
                 await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
@@ -3214,6 +3252,7 @@ export class CodexAcpServer {
             );
             sessionState.lastTokenUsage = null;
             ensurePendingTurnStart();
+            goalLifecycle.prepareTurn();
             const sendPromptPromise = this.runWithProcessCheck(
                 () => this.codexAcpClient.sendPrompt(
                     effectiveParams,
@@ -3225,6 +3264,11 @@ export class CodexAcpServer {
                     sessionState.additionalDirectories,
                     (turnId) => {
                         const turn = {threadId: params.sessionId, turnId};
+                        if (!goalLifecycle.startSubmittedTurn(turnId)) {
+                            pendingTurnStart?.resolve(turnId);
+                            onTurnStarted?.();
+                            return;
+                        }
                         activePrompt.currentTurn = turn;
                         if (this.promptShouldStop(params.sessionId, activePrompt)) {
                             this.interruptLateStartedTurn(turn);
@@ -3251,6 +3295,12 @@ export class CodexAcpServer {
                 return cancelledPromptResponse();
             }
 
+            await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
+            const firstPromptTurn = turnCompleted;
+            turnCompleted = await this.runWithProcessCheck(() => Promise.race([
+                goalLifecycle.waitForCompletion(firstPromptTurn), activePrompt.closeSignal,
+            ]));
+            if (turnCompleted === null) return cancelledPromptResponse();
             await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
             if (turnCompleted.turn.status === "completed") {
                 await eventHandler.waitForNativeSubagents(activePrompt.signal);
@@ -3314,6 +3364,7 @@ export class CodexAcpServer {
                     };
                     activePrompt.currentTurn = null;
                     sessionState.currentTurnId = null;
+                    goalLifecycle.prepareTurn();
                     const implementationPromise = this.runWithProcessCheck(
                         () => this.codexAcpClient.sendPrompt(
                             implementationRequest,
@@ -3325,6 +3376,7 @@ export class CodexAcpServer {
                             sessionState.additionalDirectories,
                             (turnId) => {
                                 const turn = {threadId: params.sessionId, turnId};
+                                if (!goalLifecycle.startSubmittedTurn(turnId)) return;
                                 activePrompt.currentTurn = turn;
                                 if (this.promptShouldStop(params.sessionId, activePrompt)) {
                                     this.interruptLateStartedTurn(turn);
@@ -3354,6 +3406,12 @@ export class CodexAcpServer {
                         return cancelledPromptResponse();
                     }
 
+                    await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
+                    const firstImplementationTurn = turnCompleted;
+                    turnCompleted = await this.runWithProcessCheck(() => Promise.race([
+                        goalLifecycle.waitForCompletion(firstImplementationTurn), activePrompt.closeSignal,
+                    ]));
+                    if (turnCompleted === null) return cancelledPromptResponse();
                     await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
                     if (turnCompleted.turn.status === "completed") {
                         await eventHandler.waitForNativeSubagents(activePrompt.signal);
@@ -3445,6 +3503,16 @@ export class CodexAcpServer {
             }
             throw err;
         } finally {
+            // A cancelled v1 prompt must not leave Codex's idle goal scheduler
+            // starting more foreground turns after the response is returned.
+            if ((promptWasCancelled || activePrompt.signal.aborted) && sessionState.currentGoal?.status === "active") {
+                try {
+                    const goal = await this.runWithProcessCheck(() => this.codexAcpClient.setGoalStatus(params.sessionId, "paused"));
+                    await this.publishGoalSnapshot(sessionState, toThreadGoalSnapshot(goal), false);
+                } catch (error) {
+                    logger.error("Failed to pause goal after prompt cancellation", error);
+                }
+            }
             // The app-server subscription is session-scoped and outlives this prompt. Flip routing before
             // awaiting disposal so queued late notifications cannot enter prompt-local buffers.
             promptNotificationsActive = false;
@@ -3469,6 +3537,9 @@ export class CodexAcpServer {
             }
             logger.log("Prompt completed", {sessionId: params.sessionId});
             await eventHandler?.dispose();
+            disposeGoalConnection();
+            goalLifecycle.fail(new Error("ACP prompt closed"));
+            activePrompt.signal.removeEventListener("abort", cancelGoalLifecycle);
             disposePromptRequestCancellation();
             sessionState.currentTurnId = null;
             const registeredPendingTurnStart = this.pendingTurnStarts.get(params.sessionId);
@@ -3601,6 +3672,14 @@ export class CodexAcpServer {
             return;
         }
 
+        const activePrompt = this.activePrompts.get(params.sessionId);
+        // There may be no native turn in the gap before automatic continuation.
+        // Abort the owning prompt without interrupting its already-completed turn.
+        if (activePrompt?.hasCompletedTurn && activePrompt.currentTurn === null) {
+            activePrompt.requestCancel();
+            return;
+        }
+        if (activePrompt?.currentTurn) activePrompt.requestCancel();
         // After turnInterrupt(), Codex will send turn/completed, which naturally completes awaitTurnCompleted().
         await this.interruptSessionTurn(sessionState, "Cancel", false);
     }

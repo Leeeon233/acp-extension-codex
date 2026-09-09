@@ -41,14 +41,16 @@ Common statuses are `active`, `paused`, `blocked`, `limited`, and `complete`. Op
 
 ## Lifecycle architecture
 
-A goal belongs to the ACP session, not to an individual `session/prompt` request. Goal activity and prompt activity are independent:
+A goal belongs to the ACP session. Its durable state is separate from the ACP v1 prompt lifecycle:
 
 - `status: active` means the persistent objective can drive more work; it does not mean an ACP prompt is currently executing.
-- A prompt completes when its current backend turn reaches a quiescent boundary, even when the goal remains active.
-- A later autonomous cycle may publish more session updates outside that completed prompt.
-- While a turn is running, clients use steering or prompt queueing when advertised. While the session is quiescent, clients may send an ordinary `session/prompt`.
+- Once a prompt is executing an active goal, it remains open across native Codex turn completions and automatic continuations. Codex schedules those continuations; the adapter does not submit duplicate turns.
+- The prompt returns only after the goal becomes complete, paused, blocked, limited, or cleared and the final native turn has drained. A failed or interrupted turn also ends the prompt. Goal completion before the last text chunk does not truncate that output.
+- `/goal set` (an objective) and `/goal resume` follow the same lifecycle. An explicit continuation prompt is needed only when the goal control operation started no native turn at all.
+- Cancellation pauses the goal before returning, including when cancelled between native turns. Connection loss fails the pending prompt.
+- While a prompt is open, clients use steering or prompt queueing when advertised. A stored active goal outside a prompt does not establish live presence.
 
-This separation prevents a persistent goal from monopolizing the session's prompt slot and lets clients model “working now” independently from “objective remains active.”
+This uses the standard ACP v1 request/response completion boundary: one prompt may contain multiple model exchanges. It requires no Core execution extension. A v2 implementation should use standard `state_update` notifications instead of treating prompt acceptance as completion.
 
 ## Codex mapping and compatibility
 
