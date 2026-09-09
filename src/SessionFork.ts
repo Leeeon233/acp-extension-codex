@@ -45,10 +45,14 @@ export async function forkSession(
         modelProvider: await dependencies.getResumeModelProvider(),
         threadId: request.sessionId,
     });
+    // thread/fork leaves the child subscribed. runTurn waits on turn/completed
+    // notifications, so a live fork session must stay subscribed. Unsubscribe
+    // only if we fail before returning it; closeSession still unsubscribes.
     try {
         await dependencies.assignProject(response.thread, project);
-    } finally {
+    } catch (error) {
         await dependencies.codexClient.threadUnsubscribe({threadId: response.thread.id});
+        throw error;
     }
 
     const models = await dependencies.fetchAvailableModels();

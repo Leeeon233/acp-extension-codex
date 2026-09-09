@@ -1,5 +1,6 @@
 import {describe, expect, it, vi} from "vitest";
 import type {McpServerStdio} from "@agentclientprotocol/sdk";
+import {forkSession} from "../../SessionFork";
 import {createCodexMockTestFixture, createTestModel} from "../acp-test-utils";
 
 describe("ACP session fork", () => {
@@ -77,7 +78,39 @@ describe("ACP session fork", () => {
                 },
             },
         });
-        expect(unsubscribeSpy).toHaveBeenCalledWith({threadId: "child-session-id"});
+        expect(unsubscribeSpy).not.toHaveBeenCalled();
+    });
+
+    it("unsubscribes the child only when install fails after thread/fork", async () => {
+        const threadUnsubscribe = vi.fn().mockResolvedValue({status: "unsubscribed"});
+        const assignError = new Error("assign failed");
+        await expect(
+            forkSession(
+                {sessionId: "source-session-id", cwd: "/workspace", mcpServers: []},
+                [],
+                {
+                    codexClient: {
+                        threadFork: vi.fn().mockResolvedValue({
+                            thread: {id: "child-session-id"},
+                            model: "gpt-5",
+                            modelProvider: "openai",
+                            reasoningEffort: "medium",
+                            serviceTier: null,
+                        }),
+                        threadUnsubscribe,
+                    } as never,
+                    assignProject: vi.fn().mockRejectedValue(assignError),
+                    refreshSkills: vi.fn().mockResolvedValue(undefined),
+                    createSessionConfig: vi.fn().mockResolvedValue({}),
+                    getResumeModelProvider: vi.fn().mockResolvedValue("openai"),
+                    fetchAvailableModels: vi.fn(),
+                    createCurrentModelId: vi.fn(),
+                    getCollaborationMode: vi.fn(),
+                },
+            ),
+        ).rejects.toBe(assignError);
+        expect(threadUnsubscribe).toHaveBeenCalledTimes(1);
+        expect(threadUnsubscribe).toHaveBeenCalledWith({threadId: "child-session-id"});
     });
 
     it("creates and installs a forked session", async () => {
