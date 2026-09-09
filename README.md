@@ -108,3 +108,23 @@ See [docs/async-tasks.md](docs/async-tasks.md) for the capability, lifecycle eve
 ## License
 
 By contributing, you agree that your contributions will be licensed under the Apache 2.0 License.
+
+### Local project worktrees
+
+The adapter advertises Core `worktreeProject: { version: 1 }`. Clients can attach
+`_meta.lody.worktreeProject: { version: 1, originProjectPath: "/original/project" }` when
+creating, loading, resuming, or forking a session, while passing the actual
+worktree path as ACP `cwd`. This requires the project APIs in the pinned Codex
+0.153.4 runtime; older `CODEX_PATH` overrides may not support them.
+
+The adapter canonicalizes the root, reuses a matching Codex project, or creates
+one with a root-derived idempotency key shared by concurrent adapter processes.
+Multiple matching projects are rejected as ambiguous. New sessions and fork
+children receive the project assignment; resumed/loaded sessions receive it only
+when unassigned, preserving existing user choices. Already persisted sessions are
+backfilled when reopened; there is no bulk migration of unrelated history.
+
+Grouping keeps execution, permissions, and worktree cleanup with their existing
+owners. It does not enable Codex-managed worktree badges or Handoff. Standard
+`session/list.cwd` still filters execution directories. `ProjectApi.ts` contains
+the narrow experimental native API subset omitted by stable type generation.

@@ -1,3 +1,6 @@
+import type {LodyWorktreeProject} from "acp-extension-core";
+import {readWorktreeProject} from "./WorktreeProject";
+import type {Thread} from "./app-server/v2";
 import {createHash} from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 import {RequestError} from "@agentclientprotocol/sdk";
@@ -10,6 +13,7 @@ import {getLodyForkTurnId} from "./AcpExtensions";
 
 export type SessionForkDependencies = {
     codexClient: CodexAppServerClient;
+    assignProject(thread: Thread, project: LodyWorktreeProject | undefined): Promise<void>;
     refreshSkills(cwd: string, additionalDirectories: string[]): Promise<void>;
     createSessionConfig(
         cwd: string,
@@ -27,6 +31,7 @@ export async function forkSession(
     additionalDirectories: string[],
     dependencies: SessionForkDependencies,
 ): Promise<SessionMetadata> {
+    const project = readWorktreeProject(request._meta);
     await dependencies.refreshSkills(request.cwd, additionalDirectories);
     const lastTurnId = await resolveForkTurnId(request, dependencies.codexClient);
     const response = await dependencies.codexClient.threadFork({
@@ -40,7 +45,11 @@ export async function forkSession(
         modelProvider: await dependencies.getResumeModelProvider(),
         threadId: request.sessionId,
     });
-    await dependencies.codexClient.threadUnsubscribe({threadId: response.thread.id});
+    try {
+        await dependencies.assignProject(response.thread, project);
+    } finally {
+        await dependencies.codexClient.threadUnsubscribe({threadId: response.thread.id});
+    }
 
     const models = await dependencies.fetchAvailableModels();
     return {
