@@ -14,10 +14,6 @@ export type GoalControlAction = typeof GOAL_CONTROL_ACTIONS[number];
 export type GoalCapability = {
     version: typeof GOAL_EXTENSION_VERSION;
     actions: GoalControlAction[];
-    /** Actions accepted on the control request while a prompt is in flight. */
-    controlActions?: readonly GoalControlAction[];
-    /** Actions accepted through `prompt._meta.lody.goalControl`. */
-    promptActions?: readonly GoalControlAction[];
 }
 
 export type GoalStatus = "active" | "paused" | "blocked" | "limited" | "complete";

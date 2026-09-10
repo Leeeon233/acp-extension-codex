@@ -30,7 +30,7 @@ export type CommandHandleResult =
     | { handled: true, turnCompleted?: TurnCompletedNotification };
 
 /** Codex rejects longer objectives; fail before spending a turn on it. */
-export const GOAL_OBJECTIVE_MAX_LENGTH = 4000;
+const GOAL_OBJECTIVE_MAX_LENGTH = 4000;
 
 export const GOAL_CONTINUATION_PROMPT: acp.ContentBlock[] = [{
     type: "text",

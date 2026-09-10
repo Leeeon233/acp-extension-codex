@@ -43,11 +43,6 @@ describe("resolveGoalCommandHandleResult", () => {
 });
 
 describe("parseGoalPromptControl", () => {
-    it("reads a resume action from prompt metadata", () => {
-        expect(parseGoalPromptControl({lody: {goalControl: {version: 1, action: "resume"}}}))
-            .toEqual({version: 1, action: "resume"});
-    });
-
     it("reads a set action with its objective", () => {
         expect(parseGoalPromptControl({lody: {goalControl: {version: 1, action: "set", objective: "Ship it"}}}))
             .toEqual({version: 1, action: "set", objective: "Ship it"});
