@@ -262,6 +262,7 @@ interface ActivePrompt {
     signal: AbortSignal;
     currentTurn: { threadId: string, turnId: string } | null;
     hasCompletedTurn: boolean;
+    compactionInFlight: boolean;
     requestCancel: () => void;
     requestClose: () => void;
     complete: () => void;
@@ -2775,6 +2776,7 @@ export class CodexAcpServer {
             signal: abortController.signal,
             currentTurn: null,
             hasCompletedTurn: false,
+            compactionInFlight: false,
             requestCancel: () => {
                 if (abortController.signal.aborted) {
                     return;
@@ -3150,6 +3152,12 @@ export class CodexAcpServer {
                     sessionState.currentTurnId = turnId;
                     pendingTurnStart?.resolve(turnId);
                     onTurnStarted?.();
+                },
+                onCompactionStarted: () => {
+                    activePrompt.compactionInFlight = true;
+                },
+                onCompactionFinished: () => {
+                    activePrompt.compactionInFlight = false;
                 },
                 setConfigOption: async (configId, value) => {
                     await this.applySessionConfigOption(sessionState, {
@@ -3680,6 +3688,12 @@ export class CodexAcpServer {
         }
 
         const activePrompt = this.activePrompts.get(params.sessionId);
+        // `/compact` is a non-turn command. It keeps the ACP prompt open while
+        // waiting for `thread/compacted`, but Codex has no turn id to interrupt.
+        if (activePrompt?.compactionInFlight === true) {
+            activePrompt.requestCancel();
+            return;
+        }
         // There may be no native turn in the gap before automatic continuation.
         // Abort the owning prompt without interrupting its already-completed turn.
         if (activePrompt?.hasCompletedTurn && activePrompt.currentTurn === null) {

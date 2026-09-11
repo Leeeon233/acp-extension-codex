@@ -1885,6 +1885,41 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         expect(mockFixture.getAcpConnectionDump([])).toContain("Context compacted");
     });
 
+    it('cancels a compact slash command without waiting for compaction completion', async () => {
+        const { mockFixture, sessionState } = setupPromptFixture();
+        const compactStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
+            .mockResolvedValue({});
+        // @ts-expect-error - registering local session state for the ACP cancel path
+        mockFixture.getCodexAcpAgent().sessions.set("session-id", sessionState);
+
+        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "/compact" }],
+        });
+
+        await vi.waitFor(() => {
+            expect(compactStartSpy).toHaveBeenCalledWith({ threadId: "session-id" });
+        });
+
+        await expect(mockFixture.getCodexAcpAgent().cancel({ sessionId: "session-id" })).resolves.toBeUndefined();
+        await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
+
+        // Cancellation must release the ACP prompt even while Codex is still
+        // compacting, otherwise the next prompt is rejected as already active.
+        await expect(mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "/status" }],
+        })).resolves.toMatchObject({ stopReason: "end_turn" });
+
+        // The provider may still emit its terminal notification after the prompt
+        // has been cancelled; it must be harmless and must not resurrect the prompt.
+        mockFixture.sendServerNotification({
+            method: "thread/compacted",
+            params: { threadId: "session-id", turnId: "compact-turn-id" },
+        });
+        await flushAsyncWork();
+    });
+
     it('does not start duplicate turns after slash set and resume native turns', async () => {
         const { mockFixture, turnStartSpy } = setupPromptFixture();
         const goalRunSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "runGoalSet")
