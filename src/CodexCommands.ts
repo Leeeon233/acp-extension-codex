@@ -1,5 +1,5 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import type {AvailableCommand} from "@agentclientprotocol/sdk";
+import {RequestError, type AvailableCommand} from "@agentclientprotocol/sdk";
 import {ACPSessionConnection, type AcpClientConnection} from "./ACPSessionConnection";
 import type {CodexAcpClient} from "./CodexAcpClient";
 import type {
@@ -18,6 +18,7 @@ import {
     LODY_PLAN_MODE_CONFIG_ID,
     PLAN_COLLABORATION_MODE,
 } from "./CollaborationModeConfig";
+import {GOAL_EXTENSION_VERSION, type GoalPromptControl} from "./GoalExtension";
 
 type ParsedSlashCommand = {
     name: string;
@@ -27,6 +28,9 @@ type ParsedSlashCommand = {
 export type CommandHandleResult =
     | { handled: false, prompt?: acp.ContentBlock[] }
     | { handled: true, turnCompleted?: TurnCompletedNotification };
+
+/** Codex rejects longer objectives; fail before spending a turn on it. */
+const GOAL_OBJECTIVE_MAX_LENGTH = 4000;
 
 export const GOAL_CONTINUATION_PROMPT: acp.ContentBlock[] = [{
     type: "text",
@@ -384,37 +388,65 @@ export class CodexCommands {
             return { handled: true };
         }
 
-        switch (argument.toLowerCase()) {
-            case "pause":
-                await this.runWithProcessCheck(() => this.codexAcpClient.setGoalStatus(sessionId, "paused"));
-                return { handled: true };
-            case "resume":
-                options.onTurnStartPending?.();
-                return this.createGoalCommandResult(await this.runWithProcessCheck(() => this.codexAcpClient.resumeGoal(
-                    sessionId,
-                    (turnId) => {
-                        this.handleCommandTurnStarted(sessionState, options, turnId, sessionId);
-                    },
-                )));
-            case "clear":
-                await this.runWithProcessCheck(() => this.codexAcpClient.clearGoal(sessionId));
-                return { handled: true };
+        const named = argument.toLowerCase();
+        if (named === "pause" || named === "resume" || named === "clear") {
+            return await this.runGoalPromptControl(
+                sessionState,
+                {version: GOAL_EXTENSION_VERSION, action: named},
+                options,
+            );
         }
 
-        if (argument.length > 4000) {
+        if (argument.length > GOAL_OBJECTIVE_MAX_LENGTH) {
             const session = new ACPSessionConnection(this.connection, sessionId);
-            await session.update(createAgentTextMessageChunk('Command "/goal" requires goal text of at most 4000 characters.'));
+            await session.update(createAgentTextMessageChunk(
+                `Command "/goal" requires goal text of at most ${GOAL_OBJECTIVE_MAX_LENGTH} characters.`,
+            ));
             return { handled: true };
         }
 
+        return await this.runGoalPromptControl(
+            sessionState,
+            {version: GOAL_EXTENSION_VERSION, action: "set", objective: argument},
+            options,
+        );
+    }
+
+    /**
+     * Run a goal action inside whatever prompt is already executing. `/goal …`
+     * and a prompt carrying `_meta.lody.goalControl` are the same operation
+     * reaching the same place: the caller's prompt owns any turn the action
+     * starts, so neither has to start one behind the client's back.
+     */
+    async runGoalPromptControl(
+        sessionState: SessionState,
+        control: GoalPromptControl,
+        options: CommandHandleOptions = {},
+    ): Promise<CommandHandleResult> {
+        const sessionId = sessionState.sessionId;
+        if (control.action === "pause") {
+            await this.runWithProcessCheck(() => this.codexAcpClient.setGoalStatus(sessionId, "paused"));
+            return { handled: true };
+        }
+        if (control.action === "clear") {
+            await this.runWithProcessCheck(() => this.codexAcpClient.clearGoal(sessionId));
+            return { handled: true };
+        }
+        if (control.action === "set" && control.objective.trim().length > GOAL_OBJECTIVE_MAX_LENGTH) {
+            throw RequestError.invalidParams(
+                undefined,
+                `A goal objective may be at most ${GOAL_OBJECTIVE_MAX_LENGTH} characters`,
+            );
+        }
         options.onTurnStartPending?.();
-        return this.createGoalCommandResult(await this.runWithProcessCheck(() => this.codexAcpClient.setGoal(
-            sessionId,
-            argument,
-            (turnId) => {
-                this.handleCommandTurnStarted(sessionState, options, turnId, sessionId);
-            },
-        )));
+        const onTurnStarted = (turnId: string) => {
+            this.handleCommandTurnStarted(sessionState, options, turnId, sessionId);
+        };
+        return this.createGoalCommandResult(await this.runWithProcessCheck(() =>
+            control.action === "set"
+                ? this.codexAcpClient.setGoal(sessionId, control.objective.trim(), onTurnStarted)
+                : this.codexAcpClient.resumeGoal(sessionId, onTurnStarted),
+        ));
     }
 
     private handleCommandTurnStarted(

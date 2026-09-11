@@ -12,7 +12,7 @@ const turn = (id: string, status: Turn["status"] = "completed"): Turn => ({
     startedAt: null, completedAt: null, durationMs: null,
 });
 
-async function startPrompt(prompt = "Pursue the test goal") {
+async function startPrompt(prompt = "Pursue the test goal", meta?: Record<string, unknown>) {
     const fixture = createCodexMockTestFixture();
     const agent = fixture.getCodexAcpAgent();
     const client = fixture.getCodexAcpClient();
@@ -41,7 +41,7 @@ async function startPrompt(prompt = "Pursue the test goal") {
         return () => {};
     });
     let settled = false;
-    const response = agent.prompt({sessionId, prompt: [{type: "text", text: prompt}]})
+    const response = agent.prompt({sessionId, prompt: [{type: "text", text: prompt}], ...(meta ? {_meta: meta} : {})})
         .finally(() => { settled = true; });
     await started;
     const sendGoal = (status: ThreadGoal["status"]) => fixture.sendServerNotification({
@@ -83,6 +83,21 @@ describe("Goal continuation through ACP v1 prompt", () => {
         });
         expect(output).toEqual(["First turn.", "Last turn."]);
         expect(run.native.turnStart).toHaveBeenCalledTimes(prompt.startsWith("/goal") ? 0 : 1);
+    });
+
+    it("resumes from prompt metadata without command text or a duplicate turn", async () => {
+        const run = await startPrompt("Continue working toward the active goal.", {
+            lody: {goalControl: {version: 1, action: "resume"}},
+        });
+        expect(run.settled()).toBe(false);
+        expect(run.native.runGoalSet).toHaveBeenCalledWith(
+            expect.objectContaining({threadId: sessionId, status: "active"}),
+            expect.any(Function),
+        );
+        // The metadata action replaces the prompt, so nothing extra is submitted.
+        expect(run.native.turnStart).not.toHaveBeenCalled();
+        run.sendGoal("paused");
+        await expect(run.response).resolves.toMatchObject({stopReason: "end_turn"});
     });
 
     it("cancels in the gap and pauses the native goal scheduler", async () => {
