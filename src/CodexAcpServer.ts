@@ -2837,7 +2837,7 @@ export class CodexAcpServer {
 
     private cancelBeforeTurnStarted(activePrompt: ActivePrompt): Promise<null> {
         return activePrompt.cancelSignal.then(() => {
-            if (activePrompt.currentTurn === null) {
+            if (activePrompt.currentTurn === null && !activePrompt.compactionInFlight) {
                 return null;
             }
             return new Promise<null>(() => {});
@@ -2919,7 +2919,13 @@ export class CodexAcpServer {
         }
     }
 
-    private interruptLateStartedTurn(turn: { threadId: string, turnId: string }): void {
+    private interruptLateStartedTurn(turn: { threadId: string, turnId: string }, activePrompt: ActivePrompt): void {
+        if (activePrompt.compactionInFlight) {
+            this.codexAcpClient.markTurnStale(turn);
+            // Interrupt acknowledgement cannot settle a submitted compaction.
+            void this.requestTurnInterrupt(turn, "Cancel");
+            return;
+        }
         void this.interruptPromptTurn(turn, "Close");
     }
 
@@ -3097,7 +3103,7 @@ export class CodexAcpServer {
                             const turn = {threadId: params.sessionId, turnId: event.params.turn.id};
                             activePrompt.currentTurn = turn;
                             if (this.promptShouldStop(params.sessionId, activePrompt)) {
-                                this.interruptLateStartedTurn(turn);
+                                this.interruptLateStartedTurn(turn, activePrompt);
                                 return;
                             }
                             recoverableSessionFailure = sessionState.sessionFailure;
@@ -3146,7 +3152,7 @@ export class CodexAcpServer {
                     if (threadId === params.sessionId) goalLifecycle.startTurn(turnId);
                     activePrompt.currentTurn = turn;
                     if (this.promptShouldStop(params.sessionId, activePrompt)) {
-                        this.interruptLateStartedTurn(turn);
+                        this.interruptLateStartedTurn(turn, activePrompt);
                         return;
                     }
                     sessionState.currentTurnId = turnId;
@@ -3286,7 +3292,7 @@ export class CodexAcpServer {
                         }
                         activePrompt.currentTurn = turn;
                         if (this.promptShouldStop(params.sessionId, activePrompt)) {
-                            this.interruptLateStartedTurn(turn);
+                            this.interruptLateStartedTurn(turn, activePrompt);
                             return;
                         }
                         sessionState.currentTurnId = turnId;
@@ -3394,7 +3400,7 @@ export class CodexAcpServer {
                                 if (!goalLifecycle.startSubmittedTurn(turnId)) return;
                                 activePrompt.currentTurn = turn;
                                 if (this.promptShouldStop(params.sessionId, activePrompt)) {
-                                    this.interruptLateStartedTurn(turn);
+                                    this.interruptLateStartedTurn(turn, activePrompt);
                                     return;
                                 }
                                 sessionState.currentTurnId = turnId;
@@ -3688,11 +3694,11 @@ export class CodexAcpServer {
         }
 
         const activePrompt = this.activePrompts.get(params.sessionId);
-        // `/compact` is a non-turn command. It keeps the ACP prompt open while
-        // waiting for `thread/compacted`, but Codex has no turn id to interrupt.
-        if (activePrompt?.compactionInFlight === true) {
+        if (activePrompt?.compactionInFlight) {
             activePrompt.requestCancel();
-            return;
+            // A submitted compact owns the prompt before its native turn arrives.
+            // The turn-start callback interrupts it when the id becomes available.
+            if (activePrompt.currentTurn === null) return;
         }
         // There may be no native turn in the gap before automatic continuation.
         // Abort the owning prompt without interrupting its already-completed turn.

@@ -683,8 +683,11 @@ export class CodexAcpClient {
         }, onTurnStarted);
     }
 
-    async runCompact(sessionId: string): Promise<void> {
-        await this.codexClient.runCompact({threadId: sessionId});
+    async runCompact(
+        sessionId: string,
+        onTurnStarted?: (turnId: string) => void,
+    ): Promise<TurnCompletedNotification> {
+        return await this.codexClient.runCompact({threadId: sessionId}, onTurnStarted);
     }
 
     async getGoal(sessionId: string): Promise<ThreadGoal | null> {
