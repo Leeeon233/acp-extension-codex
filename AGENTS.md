@@ -36,7 +36,8 @@
 - Manual `/compact` owns the native turn reported by `turn/started` until matching
   `turn/completed`. Cancel sends `turn/interrupt`; a pre-start cancellation waits for
   the turn id and interrupts it on arrival. Never release the prompt on the compact
-  start ACK, `item/completed`, or `thread/compacted` alone.
+  start/interrupt ACK, local synthetic completion, `item/completed`, or
+  `thread/compacted` alone.
 - ACP v1 prompt completion follows native Goal continuations across turn boundaries. Keep
   the prompt and interaction handlers open until the goal stops and its last native turn
   drains, or the turn fails/is cancelled. Never issue another `turn/start` after a routed

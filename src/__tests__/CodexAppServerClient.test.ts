@@ -51,6 +51,24 @@ describe("CodexAppServerClient turn lifecycle", () => {
         await expect(compact).resolves.toMatchObject({threadId: "thread-1", turn: {id: "compact-1", status}});
     });
 
+    it("keeps compact pending after a local interrupted completion until its native terminal event", async () => {
+        vi.useFakeTimers();
+        try {
+            const h = compactHarness();
+            let settled = false;
+            const compact = h.client.runCompact({threadId: "thread-1"})
+                .then(result => { settled = true; return result; });
+            h.start();
+            h.client.resolveTurnInterrupted("thread-1", "compact-1");
+            await vi.advanceTimersByTimeAsync(0);
+            expect(settled).toBe(false);
+            h.finish("interrupted");
+            await expect(compact).resolves.toMatchObject({turn: {status: "interrupted"}});
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it.each([
         {started: false, acknowledged: false},
         {started: false, acknowledged: true},

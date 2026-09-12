@@ -6,9 +6,11 @@ Set `CODEX_PATH` to run a different Codex binary; versions other than the one sp
 | Manual `/compact` | `thread/compact/start`, then `turn/started` | Matching `turn/completed`, including failure or interruption |
 | Stop during compaction | `turn/interrupt` for the captured thread and turn | The prompt remains owned until the native turn ends or the connection closes |
 
-The compact start response only acknowledges submission. Cancellation before the
-native turn arrives is retained and interrupts that turn when its id becomes known.
-Compaction item notifications still render progress, but cannot release a prompt.
+The compact start and interrupt responses only acknowledge their requests.
+Cancellation before the native turn arrives is retained and interrupts that turn
+when its id becomes known. Only the matching native terminal notification can
+complete compaction; local interruption fallbacks and compaction item notifications
+cannot release its prompt. See the [cancellation boundary decision](.agents/notes/implemented/bug-fix/2026-09-12-native-compaction-cancellation.md).
 
 ### Runtime environment
 

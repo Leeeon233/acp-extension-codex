@@ -1897,10 +1897,14 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         const { mockFixture, sessionState } = setupPromptFixture();
         const submitted = deferred<void>();
         const interrupted = deferred<{threadId: string, turnId: string}>();
+        const interruptAck = deferred<void>();
         vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
             .mockImplementation(async () => { submitted.resolve(); return {}; });
         vi.spyOn(mockFixture.getCodexAcpClient(), "turnInterrupt")
-            .mockImplementation(async (turn) => { interrupted.resolve(turn); });
+            .mockImplementation(async (turn) => {
+                interrupted.resolve(turn);
+                await interruptAck.promise;
+            });
         // @ts-expect-error - registering local session state for the ACP cancel path
         mockFixture.getCodexAcpAgent().sessions.set("session-id", sessionState);
         const controller = new AbortController();
@@ -1921,20 +1925,33 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             start();
             await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
         }
+        let cancelRequest: Promise<void> | undefined;
         if (source === "stop") {
-            await mockFixture.getCodexAcpAgent().cancel({sessionId: "session-id"});
+            cancelRequest = mockFixture.getCodexAcpAgent().cancel({sessionId: "session-id"});
         } else {
             controller.abort();
         }
-        // Neither cancellation nor an interrupt ACK releases provider ownership.
         await expect(mockFixture.getCodexAcpAgent().prompt({
             sessionId: "session-id",
             prompt: [{ type: "text", text: "/status" }],
         })).rejects.toMatchObject({code: -32600, data: "A Codex prompt is already active; use the advertised steer extension"});
         if (beforeStart) start();
         expect(await interrupted.promise).toEqual({threadId: "session-id", turnId: "compact-turn-id"});
-        await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
-        expect(promptResolved).toBe(false);
+        vi.useFakeTimers();
+        try {
+            interruptAck.resolve();
+            // Drain the ACK's promise continuations without advancing elapsed time.
+            await vi.advanceTimersByTimeAsync(0);
+            await cancelRequest;
+            await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
+            expect(promptResolved).toBe(false);
+            await expect(mockFixture.getCodexAcpAgent().prompt({
+                sessionId: "session-id",
+                prompt: [{ type: "text", text: "/status" }],
+            })).rejects.toMatchObject({code: -32600, data: "A Codex prompt is already active; use the advertised steer extension"});
+        } finally {
+            vi.useRealTimers();
+        }
         mockFixture.sendServerNotification({
             method: "turn/completed",
             params: {threadId: "session-id", turn: createTurn("compact-turn-id", "interrupted")},

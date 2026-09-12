@@ -208,6 +208,10 @@ export class CodexAppServerClient {
                 this.resolveMcpServerStartupResolvers();
             }
             if (isTurnCompletedNotification(serverNotification)) {
+                const compact = this.pendingCompactTurns.get(serverNotification.params.threadId);
+                if (compact?.turnId === serverNotification.params.turn.id) {
+                    compact.resolve(serverNotification.params);
+                }
                 this.recordTurnCompleted(serverNotification.params);
             }
             if (serverNotification.method === "turn/started") {
@@ -815,8 +819,6 @@ export class CodexAppServerClient {
     }
 
     private recordTurnCompleted(event: TurnCompletedNotification): void {
-        const compact = this.pendingCompactTurns.get(event.threadId);
-        if (compact?.turnId === event.turn.id) compact.resolve(event);
         const threadResolvers = this.pendingTurnCompletionResolvers.get(event.threadId);
         const entry = threadResolvers?.get(event.turn.id);
         if (entry) {
