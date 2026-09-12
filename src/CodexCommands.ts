@@ -266,10 +266,15 @@ export class CodexCommands {
                 return { handled: options.setConfigOption !== undefined };
             }
             case "compact": {
+                options.onTurnStartPending?.();
                 options.onCompactionStarted?.();
                 try {
-                    await this.runWithProcessCheck(() => this.codexAcpClient.runCompact(sessionId));
-                    return { handled: true };
+                    const turnCompleted = await this.runWithProcessCheck(() =>
+                        this.codexAcpClient.runCompact(sessionId, (turnId) => {
+                            options.onTurnStarted?.(turnId, sessionId);
+                        }),
+                    );
+                    return { handled: true, turnCompleted };
                 } finally {
                     options.onCompactionFinished?.();
                 }

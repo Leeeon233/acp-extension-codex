@@ -1854,8 +1854,9 @@ describe('ACP server test', { timeout: 40_000 }, () => {
 
     it('waits for compact slash command completion', async () => {
         const { mockFixture, turnStartSpy } = setupPromptFixture();
-        const compactStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
-            .mockResolvedValue({});
+        const submitted = deferred<void>();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
+            .mockImplementation(async () => { submitted.resolve(); return {}; });
 
         let promptResolved = false;
         const promptPromise = mockFixture.getCodexAcpAgent().prompt({
@@ -1866,16 +1867,18 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             return response;
         });
 
-        await vi.waitFor(() => {
-            expect(compactStartSpy).toHaveBeenCalledWith({ threadId: "session-id" });
+        await submitted.promise;
+        mockFixture.sendServerNotification({
+            method: "turn/started",
+            params: { threadId: "session-id", turn: createTurn("compact-turn-id", "inProgress") },
         });
-        await Promise.resolve();
-        expect(promptResolved).toBe(false);
-
         mockFixture.sendServerNotification({
             method: "thread/compacted",
             params: { threadId: "session-id", turnId: "compact-turn-id" },
         });
+        await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
+        expect(promptResolved).toBe(false);
+        mockFixture.sendServerNotification(createTurnCompletedNotification("session-id", "compact-turn-id"));
 
         await expect(promptPromise).resolves.toEqual(expect.objectContaining({
             stopReason: "end_turn",
@@ -1885,39 +1888,62 @@ describe('ACP server test', { timeout: 40_000 }, () => {
         expect(mockFixture.getAcpConnectionDump([])).toContain("Context compacted");
     });
 
-    it('cancels a compact slash command without waiting for compaction completion', async () => {
+    it.each([
+        { source: "stop", beforeStart: false },
+        { source: "stop", beforeStart: true },
+        { source: "request-abort", beforeStart: false },
+        { source: "request-abort", beforeStart: true },
+    ])('interrupts compact through $source (before native start: $beforeStart) and drains before reuse', async ({source, beforeStart}) => {
         const { mockFixture, sessionState } = setupPromptFixture();
-        const compactStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
-            .mockResolvedValue({});
+        const submitted = deferred<void>();
+        const interrupted = deferred<{threadId: string, turnId: string}>();
+        vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
+            .mockImplementation(async () => { submitted.resolve(); return {}; });
+        vi.spyOn(mockFixture.getCodexAcpClient(), "turnInterrupt")
+            .mockImplementation(async (turn) => { interrupted.resolve(turn); });
         // @ts-expect-error - registering local session state for the ACP cancel path
         mockFixture.getCodexAcpAgent().sessions.set("session-id", sessionState);
-
+        const controller = new AbortController();
+        let promptResolved = false;
         const promptPromise = mockFixture.getCodexAcpAgent().prompt({
             sessionId: "session-id",
             prompt: [{ type: "text", text: "/compact" }],
+        }, controller.signal).then(response => {
+            promptResolved = true;
+            return response;
         });
-
-        await vi.waitFor(() => {
-            expect(compactStartSpy).toHaveBeenCalledWith({ threadId: "session-id" });
+        const start = () => mockFixture.sendServerNotification({
+            method: "turn/started",
+            params: { threadId: "session-id", turn: createTurn("compact-turn-id", "inProgress") },
         });
-
-        await expect(mockFixture.getCodexAcpAgent().cancel({ sessionId: "session-id" })).resolves.toBeUndefined();
-        await expect(promptPromise).resolves.toMatchObject({ stopReason: "cancelled" });
-
-        // Cancellation must release the ACP prompt even while Codex is still
-        // compacting, otherwise the next prompt is rejected as already active.
+        await submitted.promise;
+        if (!beforeStart) {
+            start();
+            await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
+        }
+        if (source === "stop") {
+            await mockFixture.getCodexAcpAgent().cancel({sessionId: "session-id"});
+        } else {
+            controller.abort();
+        }
+        // Neither cancellation nor an interrupt ACK releases provider ownership.
         await expect(mockFixture.getCodexAcpAgent().prompt({
             sessionId: "session-id",
             prompt: [{ type: "text", text: "/status" }],
-        })).resolves.toMatchObject({ stopReason: "end_turn" });
-
-        // The provider may still emit its terminal notification after the prompt
-        // has been cancelled; it must be harmless and must not resurrect the prompt.
+        })).rejects.toMatchObject({code: -32600, data: "A Codex prompt is already active; use the advertised steer extension"});
+        if (beforeStart) start();
+        expect(await interrupted.promise).toEqual({threadId: "session-id", turnId: "compact-turn-id"});
+        await mockFixture.getCodexAcpClient().waitForSessionNotifications("session-id");
+        expect(promptResolved).toBe(false);
         mockFixture.sendServerNotification({
-            method: "thread/compacted",
-            params: { threadId: "session-id", turnId: "compact-turn-id" },
+            method: "turn/completed",
+            params: {threadId: "session-id", turn: createTurn("compact-turn-id", "interrupted")},
         });
-        await flushAsyncWork();
+        await expect(promptPromise).resolves.toMatchObject({stopReason: "cancelled"});
+        await expect(mockFixture.getCodexAcpAgent().prompt({
+            sessionId: "session-id",
+            prompt: [{ type: "text", text: "Continue after cancellation" }],
+        })).resolves.toMatchObject({stopReason: "end_turn"});
     });
 
     it('does not start duplicate turns after slash set and resume native turns', async () => {
@@ -3371,31 +3397,6 @@ describe('ACP server test', { timeout: 40_000 }, () => {
             'Command "/goal" requires [<objective>|clear|pause|resume].'
         );
     });
-    it('returns cancelled promptly when non-interruptible slash command startup is cancelled', async () => {
-        const { mockFixture } = setupPromptFixture();
-        const compactStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "threadCompactStart")
-            .mockResolvedValue({});
-        const controller = new AbortController();
-
-        const promptPromise = mockFixture.getCodexAcpAgent().prompt({
-            sessionId: "session-id",
-            prompt: [{ type: "text", text: "/compact" }],
-        }, controller.signal);
-
-        await vi.waitFor(() => {
-            expect(compactStartSpy).toHaveBeenCalledWith({ threadId: "session-id" });
-        });
-
-        controller.abort();
-        await expect(promptPromise).resolves.toMatchObject({stopReason: "cancelled"});
-
-        mockFixture.sendServerNotification({
-            method: "thread/compacted",
-            params: { threadId: "session-id", turnId: "compact-turn-id" },
-        });
-        await flushAsyncWork();
-    });
-
     it('reports missing review slash command input', async () => {
         const { mockFixture } = setupPromptFixture();
         const reviewStartSpy = vi.spyOn(mockFixture.getCodexAppServerClient(), "reviewStart")

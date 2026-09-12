@@ -84,7 +84,6 @@ import type {
     FileChangeRequestApprovalResponse,
     PermissionsRequestApprovalParams,
     PermissionsRequestApprovalResponse,
-    ItemCompletedNotification,
 } from "./app-server/v2";
 import type {
     ThreadBackgroundTerminalsRequest,
@@ -172,7 +171,12 @@ export class CodexAppServerClient {
         resolve: (event: TurnCompletedNotification) => void;
         reject: (error: Error) => void;
     }>>();
-    private readonly pendingCompactionCompletionResolvers = new Map<string, Set<(event: CompactionCompletedNotification) => void>>();
+    private readonly pendingCompactTurns = new Map<string, {
+        turnId: string | null;
+        onTurnStarted: ((turnId: string) => void) | undefined;
+        resolve: (event: TurnCompletedNotification) => void;
+        reject: (error: Error) => void;
+    }>();
     private readonly turnCompletionCaptures = new Map<string, Set<(event: TurnCompletedNotification) => void>>();
     private readonly turnRoutingCaptures = new Map<string, Set<(turnId: string) => void>>();
     private readonly threadStatusCaptures = new Map<string, Set<(status: ThreadStatus) => void>>();
@@ -206,8 +210,12 @@ export class CodexAppServerClient {
             if (isTurnCompletedNotification(serverNotification)) {
                 this.recordTurnCompleted(serverNotification.params);
             }
-            if (isCompactionCompletedNotification(serverNotification)) {
-                this.recordCompactionCompleted(serverNotification);
+            if (serverNotification.method === "turn/started") {
+                const compact = this.pendingCompactTurns.get(serverNotification.params.threadId);
+                if (compact && compact.turnId === null) {
+                    compact.turnId = serverNotification.params.turn.id;
+                    compact.onTurnStarted?.(compact.turnId);
+                }
             }
             if (isThreadStatusChangedNotification(serverNotification)) {
                 this.recordThreadStatusChanged(serverNotification.params);
@@ -543,10 +551,27 @@ export class CodexAppServerClient {
         };
     }
 
-    async runCompact(params: ThreadCompactStartParams): Promise<CompactionCompletedNotification> {
-        const compactionCompleted = this.awaitCompactionCompleted(params.threadId);
-        await this.threadCompactStart(params);
-        return await compactionCompleted;
+    async runCompact(
+        params: ThreadCompactStartParams,
+        onTurnStarted?: (turnId: string) => void,
+    ): Promise<TurnCompletedNotification> {
+        if (this.turnCompletionTerminalError) throw this.turnCompletionTerminalError;
+        if (this.pendingCompactTurns.has(params.threadId)) {
+            throw new Error("A compaction request already owns this thread");
+        }
+        // The start response is only an acknowledgement. Capture the native turn
+        // before sending so cancellation and early terminal events keep one owner.
+        const completion = new Promise<TurnCompletedNotification>((resolve, reject) => {
+            this.pendingCompactTurns.set(params.threadId, {
+                turnId: null, onTurnStarted, resolve, reject,
+            });
+        });
+        try {
+            const [, completed] = await Promise.all([this.threadCompactStart(params), completion]);
+            return completed;
+        } finally {
+            this.pendingCompactTurns.delete(params.threadId);
+        }
     }
 
     async turnInterrupt(params: TurnInterruptParams): Promise<TurnInterruptResponse> {
@@ -733,14 +758,6 @@ export class CodexAppServerClient {
         });
     }
 
-    async awaitCompactionCompleted(threadId: string): Promise<CompactionCompletedNotification> {
-        return await new Promise((resolve) => {
-            const resolvers = this.pendingCompactionCompletionResolvers.get(threadId) ?? new Set();
-            resolvers.add(resolve);
-            this.pendingCompactionCompletionResolvers.set(threadId, resolvers);
-        });
-    }
-
     resolveTurnInterrupted(threadId: string, turnId: string): void {
         this.recordTurnCompleted({
             threadId,
@@ -798,6 +815,8 @@ export class CodexAppServerClient {
     }
 
     private recordTurnCompleted(event: TurnCompletedNotification): void {
+        const compact = this.pendingCompactTurns.get(event.threadId);
+        if (compact?.turnId === event.turn.id) compact.resolve(event);
         const threadResolvers = this.pendingTurnCompletionResolvers.get(event.threadId);
         const entry = threadResolvers?.get(event.turn.id);
         if (entry) {
@@ -815,21 +834,6 @@ export class CodexAppServerClient {
         }
         for (const capture of captures) {
             capture(event);
-        }
-    }
-
-    private recordCompactionCompleted(event: CompactionCompletedNotification): void {
-        const threadId = extractThreadId(event);
-        if (threadId === null) {
-            return;
-        }
-        const resolvers = this.pendingCompactionCompletionResolvers.get(threadId);
-        if (!resolvers) {
-            return;
-        }
-        this.pendingCompactionCompletionResolvers.delete(threadId);
-        for (const resolve of resolvers) {
-            resolve(event);
         }
     }
 
@@ -934,6 +938,8 @@ export class CodexAppServerClient {
      */
     private rejectAllPendingTurnCompletions(error: Error): void {
         this.turnCompletionTerminalError ??= error;
+        for (const compact of this.pendingCompactTurns.values()) compact.reject(error);
+        this.pendingCompactTurns.clear();
         const threads = [...this.pendingTurnCompletionResolvers.values()];
         this.pendingTurnCompletionResolvers.clear();
         for (const threadResolvers of threads) {
@@ -1097,10 +1103,6 @@ export type CodexConnectionEvent =
     | ({ eventType: "response" } & unknown)
     | ({ eventType: "notification" } & ServerNotification);
 
-export type CompactionCompletedNotification =
-    | { method: "thread/compacted", params: Extract<ServerNotification, { method: "thread/compacted" }>["params"] }
-    | { method: "item/completed", params: ItemCompletedNotification & { item: Extract<ItemCompletedNotification["item"], { type: "contextCompaction" }> } };
-
 type CodexRequest = DistributiveOmit<ClientRequest, "id"> | ThreadBackgroundTerminalsRequest | CodexProjectRequest
 
 type DistributiveOmit<T, K extends keyof any> = T extends any
@@ -1165,13 +1167,6 @@ function isThreadGoalClearedNotification(notification: ServerNotification): noti
     params: ThreadGoalClearedNotification;
 } {
     return notification.method === "thread/goal/cleared";
-}
-
-function isCompactionCompletedNotification(notification: ServerNotification): notification is CompactionCompletedNotification {
-    if (notification.method === "thread/compacted") {
-        return true;
-    }
-    return notification.method === "item/completed" && notification.params.item.type === "contextCompaction";
 }
 
 function goalsMatch(left: ThreadGoal, right: ThreadGoal): boolean {
